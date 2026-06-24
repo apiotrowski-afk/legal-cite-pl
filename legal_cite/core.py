@@ -46,7 +46,7 @@ EU_ACTS: dict[str, dict] = {
     "dyrektywa 2008/48": dict(celex="32008L0048", name="Dyrektywa 2008/48/WE (kredyt konsumencki)"),
 }
 
-_HEADERS = {"User-Agent": "legal-cite/0.1 (+https://github.com/apiotrowski-afk/legal-cite)"}
+_HEADERS = {"User-Agent": "legal-cite/0.1 (+https://github.com/apiotrowski-afk/legal-cite-pl)"}
 
 # cache per-proces: klucz aktu → tekst (strip HTML) całego aktu
 _cache: dict[str, str] = {}
