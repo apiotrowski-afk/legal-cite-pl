@@ -76,8 +76,13 @@ Podłączenie w Claude: **Connectors → Add custom connector** → `https://<ad
 
 ---
 
-## Related / Powiązane
-Komplementarny skill do redakcji i analizy umów: **[commercial-legal-pl](https://github.com/apiotrowski-afk/commercial-legal-pl)** — używa `verify_article`, by cytować przepisy ze źródła zamiast z pamięci modelu.
+## Ekosystem / Related
+
+Część zestawu otwartych narzędzi LegalTech (PL):
+- **[legal-cite-pl](https://github.com/apiotrowski-afk/legal-cite-pl)** — *(ten projekt)* MCP: weryfikacja brzmienia przepisu PL/UE ze źródła.
+- **[commercial-legal-pl](https://github.com/apiotrowski-afk/commercial-legal-pl)** — Claude skill: redakcja i analiza umów (PL); używa `verify_article`.
+- **[anon-legal-pl](https://github.com/apiotrowski-afk/anon-legal-pl)** — lokalna anonimizacja akt prawnych (PL).
+- **[kancelaria-dms](https://github.com/apiotrowski-afk/kancelaria-dms)** — DMS/CRM dla kancelarii (Google Workspace).
 
 ## License
 Apache License 2.0 — see [LICENSE](LICENSE).
