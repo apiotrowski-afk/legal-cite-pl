@@ -7,6 +7,7 @@ nie pierwotne z dnia ogłoszenia.
 """
 from __future__ import annotations
 
+import bisect
 import html as _html
 import re
 
@@ -54,6 +55,16 @@ logger = logging.getLogger(__name__)
 
 _zrodlo: dict[str, tuple] = {}
 _cache: dict[str, str] = {}
+# surowy HTML aktu — znaczniki jednostek redakcyjnych są pewniejsze niż regex
+# po tekście, więc wycinanie artykułu idzie najpierw po nich
+_html_cache: dict[str, str] = {}
+_jedn_cache: dict[str, list] = {}
+# (klucz aktu, numer po naprawie) → numer, jaki wydrukowało źródło
+_zlepki: dict[tuple[str, str], str] = {}
+
+
+def _klucz_pl(info: dict) -> str:
+    return f"PL:{info['pub']}:{info['year']}:{info['pos']}"
 
 
 def _resolve(act: str, table: dict) -> str | None:
@@ -110,6 +121,13 @@ def _strip_html(raw_html: str) -> str:
     #    aktu jako JSON w <script>, inaczej kradłby dopasowanie nagłówka „Art. N.".
     raw_html = re.sub(r'<(script|style)\b[^>]*>.*?</\1>', ' ', raw_html,
                       flags=re.IGNORECASE | re.DOTALL)
+    # 1a) usuń odnośniki redakcyjne (<a class="gloss-link">² wraz z treścią
+    #     przypisu w tooltipie</a>). Źródło wstawia je WEWNĄTRZ nagłówka, więc
+    #     „Art. 26." czytało się jako „Art. 26 9) W brzmieniu ustalonym przez…"
+    #     — numer tracił kropkę, nagłówek przestawał istnieć i artykuł był
+    #     nieznajdowalny. Przypis to komentarz wydawcy, nie treść przepisu.
+    raw_html = re.sub(r'<a\b[^>]*class="[^"]*gloss-link[^"]*"[^>]*>.*?</a>', '', raw_html,
+                      flags=re.IGNORECASE | re.DOTALL)
     # 2) strip tagów → 3) DEKODUJ encje (kluczowe: nagłówki to „Art.&nbsp;45." —
     #    &nbsp; to twarda spacja \xa0; po unescape regex „Art.\s*N." łapie) →
     # 4) zwiń białe znaki (w tym \xa0) do zwykłej spacji.
@@ -123,7 +141,7 @@ async def _fetch_pl(info: dict) -> str | None:
     ogłoszenia. api.sejm `/text.html` pod pozycją oryginału zwraca brzmienie
     pierwotne (np. KC 1964 — „PRL", bez art. 385¹). Dlatego z metadanych bierzemy
     najnowszy tekst jednolity z dostępnym HTML; oryginał = fallback."""
-    key = f"PL:{info['pub']}:{info['year']}:{info['pos']}"
+    key = _klucz_pl(info)
     if key in _cache:
         return _cache[key]
     base = "https://api.sejm.gov.pl/eli/acts"
@@ -150,6 +168,7 @@ async def _fetch_pl(info: dict) -> str | None:
                 text = _strip_html(resp.text)
                 if len(text) > 1500:
                     _cache[key] = text
+                    _html_cache[key] = resp.text
                     # data tego TJ i liczba nowelizacji po niej — liczone tutaj,
                     # bo metadane są już pobrane; osobne zapytania przy każdym
                     # cytacie byłyby wolne i zawodne
@@ -260,16 +279,28 @@ def _trzon_aktu(text: str) -> tuple[int, int]:
           for m in re.finditer(r'Art\.\s*(\d+)\s*\.', text)]
     if not hd:
         return (0, len(text))
-    naj = biez = [hd[0]]
-    for p, n in hd[1:]:
-        if n > biez[-1][1]:
-            biez.append((p, n))
+    # Najdłuższy rosnący PODCIĄG, nie spójny ciąg: jeden nagłówek poza kolejnością
+    # nie może dzielić trzonu na pół. W KPC źródło zlepia numer artykułu z
+    # odnośnikiem („Art. 15.22)" → „Art. 1522.", data-id="arti_1522"), co przy
+    # wymogu spójności odcinało art. 2-14 od reszty kodeksu i kazało ich odmawiać.
+    konce: list[int] = []          # konce[k] = najmniejszy koniec podciągu długości k+1
+    gdzie: list[int] = []          # indeks w hd tego końca
+    poprz = [-1] * len(hd)
+    for i, (_, n) in enumerate(hd):
+        k = bisect.bisect_left(konce, n)
+        poprz[i] = gdzie[k - 1] if k else -1
+        if k == len(konce):
+            konce.append(n)
+            gdzie.append(i)
         else:
-            if len(biez) > len(naj):
-                naj = biez
-            biez = [(p, n)]
-    if len(biez) > len(naj):
-        naj = biez
+            konce[k] = n
+            gdzie[k] = i
+    naj = []
+    i = gdzie[-1]
+    while i >= 0:
+        naj.append(hd[i])
+        i = poprz[i]
+    naj.reverse()
     zakres = (naj[0][0], naj[-1][0] + 4000)
     _trzon_cache[klucz] = zakres
     return zakres
@@ -319,6 +350,114 @@ def _wybierz_po_sasiadach(text: str, art: str, kand: list) -> list:
         return d
 
     return [min(kand, key=odleglosc)]
+
+
+_UNIT_RE = re.compile(r'<div class="unit unit_arti[^"]*" id="([^"]*)" data-id="arti_([^"]+)"')
+_DIV_RE = re.compile(r'</?div\b[^>]*>', re.IGNORECASE)
+
+
+def _koniec_div(raw_html: str, start: int) -> int:
+    """Pozycja za znacznikiem zamykającym <div> otwarty na pozycji start."""
+    glebokosc = 0
+    for m in _DIV_RE.finditer(raw_html, start):
+        if m.group(0)[1] == '/':
+            glebokosc -= 1
+            if glebokosc == 0:
+                return m.end()
+        else:
+            glebokosc += 1
+    return len(raw_html)
+
+
+def _kanon_art(raw_art: str) -> str | None:
+    """Numer artykułu w zapisie, jakim posługuje się źródło w data-id:
+    385¹/385[1]/385(1) → '385_1', 36a → '36a', 45 → '45'."""
+    s = re.sub(r'\s+', '', raw_art.strip())
+    s = re.sub(r'([¹²³⁴⁵⁶⁷⁸⁹⁰]+)', lambda m: '_' + m.group(1).translate(_SUP), s)
+    s = re.sub(r'[\[\(\^]\s*(\d+)\s*[\]\)]?', r'_\1', s).lower()
+    return s if re.fullmatch(r'\d+[a-ząćęłńóśźż]*(?:_\d+[a-ząćęłńóśźż]?)*', s) else None
+
+
+def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str]]:
+    """Artykuły właściwego aktu wg znaczników źródła, w kolejności dokumentu.
+
+    Pomija przepisy przejściowe ustaw nowelizujących — źródło oznacza je
+    prefiksem `pass_` w atrybucie id, więc nie trzeba ich zgadywać z numeracji.
+    """
+    if key in _jedn_cache:
+        return _jedn_cache[key]
+    ms = list(_UNIT_RE.finditer(raw_html))
+    out = []
+    for m in ms:
+        if 'pass_' in m.group(1):
+            continue
+        out.append((m.group(2).lower(),
+                    _strip_html(raw_html[m.start():_koniec_div(raw_html, m.start())])))
+    out = _napraw_zlepki(key, out)
+    _jedn_cache[key] = out
+    return out
+
+
+def _napraw_zlepki(key: str, jedn: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Naprawia numer artykułu zlepiony z numerem odnośnika.
+
+    Źródło drukuje art. 15 k.p.c. jako „Art. 15.22)" i oddaje w znaczniku
+    `arti_1522`, więc artykuł był nieosiągalny pod swoim numerem. Podmieniamy
+    tylko wtedy, gdy numer wypada poza kolejnością, a jego początek mieści się
+    dokładnie między sąsiadami — na 5804 artykułach dwunastu aktów taki
+    przypadek jest jeden, więc warunek jest wąski, a nie zgadywanie.
+    """
+    bazy = [int(re.match(r'(\d+)', n).group(1)) for n, _ in jedn]
+    for i in range(1, len(jedn) - 1):
+        if bazy[i - 1] < bazy[i] < bazy[i + 1]:
+            continue
+        m = re.fullmatch(r'(\d+)', jedn[i][0])
+        if not m:
+            continue
+        cyfry = m.group(1)
+        for k in range(1, len(cyfry)):
+            if bazy[i - 1] < int(cyfry[:k]) < bazy[i + 1]:
+                _zlepki[(key, cyfry[:k])] = cyfry
+                jedn[i] = (cyfry[:k], jedn[i][1])
+                break
+    return jedn
+
+
+def extract_pl_article_html(key: str, raw_html: str, art: str,
+                            ustep: str | None) -> str | None:
+    """Wycina artykuł po znacznikach jednostek redakcyjnych źródła.
+
+    Pewniejsze niż szukanie nagłówka „Art. N." w tekście: nie łapie spisu
+    treści ani odesłań i nie wymaga zgadywania, gdzie kończy się akt. Osobno
+    rozstrzyga przypadek, w którym tekst jednolity podaje DWA brzmienia tego
+    samego artykułu — obowiązujące i to, które wejdzie w życie z nowelizacją.
+    Źródło drukuje obowiązujące jako pierwsze; wybór „najdłuższego wycinka"
+    trafiał tu w brzmienie przyszłe (art. 3b u.ś.u.d.e.: 246 znaków
+    obowiązujących kontra 2044 znaki przyszłe).
+    """
+    klucz = _kanon_art(art)
+    if not klucz:
+        return None
+    trafienia = [t for n, t in _jednostki_html(key, raw_html) if n == klucz]
+    if not trafienia:
+        return None
+    tekst = trafienia[0]
+    if not _wiarygodny(tekst):
+        return None
+    if ustep:
+        tekst = _cut_ustep(tekst, ustep)
+        if not tekst:
+            return None
+    zlepek = _zlepki.get((key, klucz))
+    if zlepek:
+        tekst += (f"\n\n⚠ Źródło drukuje numer tego artykułu zlepiony z numerem "
+                  f"odnośnika („Art. {zlepek}.”). Powyżej treść art. {klucz} "
+                  f"— numer odczytany z kolejności artykułów w akcie.")
+    if len(trafienia) > 1:
+        tekst += (f"\n\n⚠ Tekst jednolity podaje {len(trafienia)} brzmienia tego "
+                  f"artykułu. Powyżej jest brzmienie obowiązujące; pozostałe wchodzą "
+                  f"w życie z nowelizacją (odnośniki w Dz.U.).")
+    return tekst
 
 
 def extract_pl_article(text: str, art: str, ustep: str | None) -> str | None:
@@ -411,7 +550,11 @@ async def verify_article(citation: str) -> str:
             return f"❌ Timeout pobierania {info['name']} z api.sejm.gov.pl"
         if text is None:
             return f"❌ Nie udało się pobrać {info['name']} (sieć/ELI)"
-        result = extract_pl_article(text, art, ustep)
+        key = _klucz_pl(info)
+        raw = _html_cache.get(key)
+        result = extract_pl_article_html(key, raw, art, ustep) if raw else None
+        if result is None:
+            result = extract_pl_article(text, art, ustep)
         if not result:
             return f"❌ {ref} nie znaleziony w {info['name']}. Sprawdź numer artykułu."
         podstawa = _podstawa_tekstu(info)
