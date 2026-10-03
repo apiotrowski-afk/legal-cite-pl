@@ -200,9 +200,9 @@ def _cut_ustep(art_text: str, ustep: str) -> str | None:
     return art_text[ust_start:ust_end].strip()
 
 
-# Minimalna wiarygodna długość treści artykułu. Poniżej tego progu wycinek
-# jest niemal na pewno odesłaniem albo pozycją spisu treści, nie przepisem.
-_MIN_TRESC = 25
+# Minimalna wiarygodna długość treści. Próg niski, bo istnieją przepisy
+# jednozdaniowe („Tworzy się Radę."); śmieci odsiewa dopiero udział liter.
+_MIN_TRESC = 12
 
 
 def _wiarygodny(art_text: str) -> bool:
@@ -259,6 +259,17 @@ def _trzon_aktu(text: str) -> tuple[int, int]:
     return zakres
 
 
+def _trzon_wiarygodny(text: str) -> bool:
+    """Czy wykryty trzon jest na tyle długi, by ufać mu przy odrzucaniu.
+
+    Przy krótkich aktach albo nietypowej numeracji wykrycie może być mylne —
+    wtedy lepiej zwrócić kandydata spoza zakresu niż odmówić wszystkiego.
+    """
+    lo, hi = _trzon_aktu(text)
+    return sum(1 for m in re.finditer(r'Art\.\s*\d+\s*\.', text)
+               if lo <= m.start() <= hi) >= 5
+
+
 def _wybierz_po_sasiadach(text: str, art: str, kand: list) -> list:
     """Zostawia kandydata najlepiej wpasowanego między art. N-1 a art. N+1.
 
@@ -312,12 +323,16 @@ def extract_pl_article(text: str, art: str, ustep: str | None) -> str | None:
             break
     if not kand:
         return None
-    if len(kand) > 1:
-        # najpierw odrzuć wszystko spoza trzonu aktu, potem rozstrzygnij sąsiadami
-        lo, hi = _trzon_aktu(text)
+    # Odrzuć kandydatów spoza trzonu aktu — także gdy jest tylko jeden.
+    # Kodeks pracy nie ma art. 19; jedyne „Art. 19." w pliku stoi w bloku
+    # przejściowym, więc poprawną odpowiedzią jest odmowa, nie cudzy przepis.
+    lo, hi = _trzon_aktu(text)
+    if hi > lo:
         w_trzonie = [k for k in kand if lo <= k[1] <= hi]
-        if w_trzonie:
+        if w_trzonie or _trzon_wiarygodny(text):
             kand = w_trzonie
+    if not kand:
+        return None
     if len(kand) > 1:
         kand = _wybierz_po_sasiadach(text, art, kand)
     # Gdy sąsiedzi nie rozstrzygają, bierzemy wycinek z najdłuższą treścią —
