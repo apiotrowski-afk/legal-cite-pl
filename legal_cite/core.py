@@ -52,6 +52,7 @@ _HEADERS = {"User-Agent": "legal-cite/0.1 (+https://github.com/apiotrowski-afk/l
 # cache per-proces: klucz aktu → tekst (strip HTML) całego aktu
 logger = logging.getLogger(__name__)
 
+_zrodlo: dict[str, tuple] = {}
 _cache: dict[str, str] = {}
 
 
@@ -128,12 +129,14 @@ async def _fetch_pl(info: dict) -> str | None:
     base = "https://api.sejm.gov.pl/eli/acts"
     async with httpx.AsyncClient(follow_redirects=True, timeout=25, headers=_HEADERS) as c:
         positions: list[tuple] = []
+        zmieniajace: list[dict] = []
         try:
             meta = (await c.get(f"{base}/{info['pub']}/{info['year']}/{info['pos']}")).json()
             for ent in (meta.get("references") or {}).get("Inf. o tekście jednolitym", []):
                 parts = (ent.get("id") or "").split("/")
                 if len(parts) == 3:
                     positions.append(tuple(parts))  # (pub, year, pos) tekstu jednolitego
+            zmieniajace = (meta.get("references") or {}).get("Akty zmieniające", [])
         except Exception:
             pass
         positions = positions[:4]  # najnowsze TJ (świeże bywają bez HTML — pomijamy puste)
@@ -147,6 +150,18 @@ async def _fetch_pl(info: dict) -> str | None:
                 text = _strip_html(resp.text)
                 if len(text) > 1500:
                     _cache[key] = text
+                    # data tego TJ i liczba nowelizacji po niej — liczone tutaj,
+                    # bo metadane są już pobrane; osobne zapytania przy każdym
+                    # cytacie byłyby wolne i zawodne
+                    data = ""
+                    try:
+                        data = ((await c.get(f"{base}/{pub}/{year}/{pos}"))
+                                .json().get("announcementDate") or "")
+                    except Exception:
+                        pass
+                    po = sum(1 for e in zmieniajace
+                             if data and (e.get("date") or "") > data)
+                    _zrodlo[key] = (f"{pub}/{year}/{pos}", data, po)
                     return text
     return None
 
@@ -185,6 +200,7 @@ async def _fetch_eu(info: dict) -> str | None:
                         nazwa, info["celex"], resp.status_code, len(resp.text))
             continue
         _cache[key] = _strip_html(resp.text)
+        _zrodlo[key] = (nazwa,)
         return _cache[key]
     return None
 
@@ -354,6 +370,26 @@ def extract_eu_article(text: str, art: str, ustep: str | None) -> str | None:
     return _cut_ustep(art_text, ustep) if ustep else art_text
 
 
+def _podstawa_tekstu(info: dict) -> str:
+    """Opis tekstu jednolitego, na którym oparta jest odpowiedź.
+
+    Narzędzie deklaruje aktualne brzmienie, a najnowszych tekstów jednolitych
+    nie ma w HTML — od 2025 r. API ELI daje dla Dz.U. wyłącznie PDF — więc
+    sięgamy po starszy. Bez tej informacji użytkownik dostaje nieaktualne
+    brzmienie opatrzone znacznikiem weryfikacji.
+    """
+    zr = _zrodlo.get(f"PL:{info['pub']}:{info['year']}:{info['pos']}")
+    if not zr or len(zr) != 3:
+        return ""
+    ident, data, po = zr
+    if not data:
+        return f"\n(tekst jednolity {ident})"
+    opis = f"\n(tekst jednolity {ident} z {data}"
+    if po:
+        opis += f"; **po tej dacie weszło {po} nowelizacji** — sprawdź aktualność"
+    return opis + ")"
+
+
 async def verify_article(citation: str) -> str:
     """Zwraca dokładne brzmienie cytowanego przepisu ze źródła oficjalnego.
     Format: 'art. N [ust. M] KOD' (np. 'art. 45 u.k.k.', 'art. 28 ust. 3 RODO')."""
@@ -378,7 +414,9 @@ async def verify_article(citation: str) -> str:
         result = extract_pl_article(text, art, ustep)
         if not result:
             return f"❌ {ref} nie znaleziony w {info['name']}. Sprawdź numer artykułu."
-        return f"📜 **{info['name']}**, {ref}\n(źródło: api.sejm.gov.pl)\n\n{result}"
+        podstawa = _podstawa_tekstu(info)
+        return (f"📜 **{info['name']}**, {ref}\n(źródło: api.sejm.gov.pl)"
+                f"{podstawa}\n\n{result}")
 
     if eu_key:
         info = EU_ACTS[eu_key]
@@ -391,7 +429,9 @@ async def verify_article(citation: str) -> str:
         result = extract_eu_article(text, art, ustep)
         if not result:
             return f"❌ {ref} nie znaleziony w {info['name']}. Sprawdź numer artykułu."
-        return f"📜 **{info['name']}**, {ref}\n(źródło: EUR-Lex, PL)\n\n{result}"
+        skad = (_zrodlo.get(f"EU:{info['celex']}") or ("EUR-Lex",))[0]
+        return (f"📜 **{info['name']}**, {ref}\n"
+                f"(źródło: {skad}, CELEX {info['celex']}, wersja polska)\n\n{result}")
 
     known = ", ".join(dict.fromkeys(list(PL_ACTS) + list(EU_ACTS)))
     return f"❌ Nieznany kod aktu: '{act}'\nObsługiwane: {known}"
