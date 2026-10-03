@@ -226,6 +226,39 @@ def _wiarygodny(art_text: str) -> bool:
     return litery >= len(body) * 0.3
 
 
+_trzon_cache: dict[int, tuple[int, int]] = {}
+
+
+def _trzon_aktu(text: str) -> tuple[int, int]:
+    """Zakres pozycji, w którym leży właściwy akt (bez przepisów przejściowych).
+
+    Tekst jednolity zawiera obok samego aktu także przepisy przejściowe ustaw
+    nowelizujących, numerowane od nowa od „Art. 1.". Trzon aktu rozpoznajemy po
+    tym, że jego artykuły tworzą najdłuższy rosnący ciąg nagłówków w kolejności
+    dokumentu — bloki przejściowe są krótkie i zaczynają numerację od początku.
+    """
+    klucz = id(text)
+    if klucz in _trzon_cache:
+        return _trzon_cache[klucz]
+    hd = [(m.start(), int(m.group(1)))
+          for m in re.finditer(r'Art\.\s*(\d+)\s*\.', text)]
+    if not hd:
+        return (0, len(text))
+    naj = biez = [hd[0]]
+    for p, n in hd[1:]:
+        if n > biez[-1][1]:
+            biez.append((p, n))
+        else:
+            if len(biez) > len(naj):
+                naj = biez
+            biez = [(p, n)]
+    if len(biez) > len(naj):
+        naj = biez
+    zakres = (naj[0][0], naj[-1][0] + 4000)
+    _trzon_cache[klucz] = zakres
+    return zakres
+
+
 def _wybierz_po_sasiadach(text: str, art: str, kand: list) -> list:
     """Zostawia kandydata najlepiej wpasowanego między art. N-1 a art. N+1.
 
@@ -279,6 +312,12 @@ def extract_pl_article(text: str, art: str, ustep: str | None) -> str | None:
             break
     if not kand:
         return None
+    if len(kand) > 1:
+        # najpierw odrzuć wszystko spoza trzonu aktu, potem rozstrzygnij sąsiadami
+        lo, hi = _trzon_aktu(text)
+        w_trzonie = [k for k in kand if lo <= k[1] <= hi]
+        if w_trzonie:
+            kand = w_trzonie
     if len(kand) > 1:
         kand = _wybierz_po_sasiadach(text, art, kand)
     # Gdy sąsiedzi nie rozstrzygają, bierzemy wycinek z najdłuższą treścią —
