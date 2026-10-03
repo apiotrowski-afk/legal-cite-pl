@@ -290,12 +290,22 @@ def extract_pl_article(text: str, art: str, ustep: str | None) -> str | None:
     return _cut_ustep(art_text, ustep) if ustep else art_text
 
 
+# Granice artykułu w akcie UE poza następnym „Artykuł N": nagłówki struktury
+# (ROZDZIAŁ/SEKCJA/TYTUŁ/ZAŁĄCZNIK — wielkie litery, żeby „tytuł prawny" w treści
+# nie ucinał) i formuła końcowa aktu przed podpisami i przypisami.
+_EU_BREAK = r'\b(?:ROZDZIAŁ|SEKCJA|TYTUŁ|ZAŁĄCZNIK)\b|\bSporządzono w\b'
+
+
 def extract_eu_article(text: str, art: str, ustep: str | None) -> str | None:
     m = re.search(rf'\bArtykuł\s+{re.escape(art)}\b', text, re.IGNORECASE)
     if not m:
         return None
-    nxt = re.search(r'\bArtykuł\s+\d+\b', text[m.end():], re.IGNORECASE)
-    end = m.end() + nxt.start() if nxt else min(m.start() + 5000, len(text))
+    rest = text[m.end():]
+    ends = [x.start() for x in (
+        re.search(r'\bArtykuł\s+\d+\b', rest, re.IGNORECASE),
+        re.search(_EU_BREAK, rest),
+    ) if x]
+    end = m.end() + min(ends) if ends else min(m.start() + 5000, len(text))
     art_text = text[m.start():end].strip()
     return _cut_ustep(art_text, ustep) if ustep else art_text
 
