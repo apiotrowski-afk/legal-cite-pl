@@ -53,6 +53,11 @@ _HEADERS = {"User-Agent": "legal-cite/0.1 (+https://github.com/apiotrowski-afk/l
 logger = logging.getLogger(__name__)
 
 _cache: dict[str, str] = {}
+# klucz aktu PL → skąd jest tekst w _cache: użyty dokument + nowsze TJ bez HTML
+_source: dict[str, dict] = {}
+
+_ELI = "https://api.sejm.gov.pl/eli/acts"
+_PUB = {"DU": "Dz.U.", "MP": "M.P."}
 
 
 def _resolve(act: str, table: dict) -> str | None:
@@ -122,10 +127,10 @@ async def _fetch_pl(info: dict) -> str | None:
     ogłoszenia. api.sejm `/text.html` pod pozycją oryginału zwraca brzmienie
     pierwotne (np. KC 1964 — „PRL", bez art. 385¹). Dlatego z metadanych bierzemy
     najnowszy tekst jednolity z dostępnym HTML; oryginał = fallback."""
-    key = f"PL:{info['pub']}:{info['year']}:{info['pos']}"
+    key = _pl_key(info)
     if key in _cache:
         return _cache[key]
-    base = "https://api.sejm.gov.pl/eli/acts"
+    base = _ELI
     async with httpx.AsyncClient(follow_redirects=True, timeout=25, headers=_HEADERS) as c:
         positions: list[tuple] = []
         try:
@@ -137,8 +142,10 @@ async def _fetch_pl(info: dict) -> str | None:
         except Exception:
             pass
         positions = positions[:4]  # najnowsze TJ (świeże bywają bez HTML — pomijamy puste)
+        n_tj = len(positions)
         positions.append((info["pub"], str(info["year"]), str(info["pos"])))  # fallback oryginał
-        for pub, year, pos in positions:
+        no_html: list[tuple] = []  # nowsze TJ, dla których API nie dało HTML (zwykle tylko PDF)
+        for i, (pub, year, pos) in enumerate(positions):
             try:
                 resp = await c.get(f"{base}/{pub}/{year}/{pos}/text.html")
             except Exception:
@@ -147,8 +154,39 @@ async def _fetch_pl(info: dict) -> str | None:
                 text = _strip_html(resp.text)
                 if len(text) > 1500:
                     _cache[key] = text
+                    _source[key] = dict(used=(pub, year, pos), tj=i < n_tj,
+                                        n_tj=n_tj, newer=no_html)
                     return text
+            if i < n_tj:
+                no_html.append((pub, year, pos))
     return None
+
+
+def _pl_key(info: dict) -> str:
+    return f"PL:{info['pub']}:{info['year']}:{info['pos']}"
+
+
+def _pl_source_note(info: dict) -> str:
+    """Którego dokumentu użyto i czy jest nowszy tekst jednolity, którego
+    nie dało się użyć (najnowsze TJ w API ELI bywają tylko w PDF)."""
+    src = _source.get(_pl_key(info))
+    if not src:
+        return "(źródło: api.sejm.gov.pl)"
+    pub, year, pos = src["used"]
+    kind = "t.j." if src["tj"] else "tekst pierwotny"
+    note = f"(źródło: api.sejm.gov.pl, {kind} {_PUB.get(pub, pub)} {year} poz. {pos})"
+    newest = pdf = ""
+    if src["newer"]:
+        p, y, n = src["newer"][0]
+        newest, pdf = f"{_PUB.get(p, p)} {y} poz. {n}", f"{_ELI}/{p}/{y}/{n}/text.pdf"
+    if src["tj"] and newest:
+        note += (f"\n⚠️ Nowszy tekst jednolity, {newest}, nie ma wersji HTML (PDF: {pdf}). "
+                 f"Powyższe brzmienie może nie uwzględniać zmian, które w nim są.")
+    elif not src["tj"] and src["n_tj"]:
+        note += ("\n⚠️ Nie udało się pobrać HTML żadnego z najnowszych tekstów jednolitych"
+                 + (f" (najnowszy: {newest}, PDF: {pdf})" if newest else "")
+                 + " — to brzmienie z dnia ogłoszenia, bez późniejszych zmian.")
+    return note
 
 
 async def _fetch_eu(info: dict) -> str | None:
@@ -378,7 +416,7 @@ async def verify_article(citation: str) -> str:
         result = extract_pl_article(text, art, ustep)
         if not result:
             return f"❌ {ref} nie znaleziony w {info['name']}. Sprawdź numer artykułu."
-        return f"📜 **{info['name']}**, {ref}\n(źródło: api.sejm.gov.pl)\n\n{result}"
+        return f"📜 **{info['name']}**, {ref}\n{_pl_source_note(info)}\n\n{result}"
 
     if eu_key:
         info = EU_ACTS[eu_key]
