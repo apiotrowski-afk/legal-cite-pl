@@ -10,6 +10,7 @@ from __future__ import annotations
 import html as _html
 import re
 
+import logging
 import httpx
 
 # --- Akty PL → ELI: api.sejm.gov.pl/eli/acts/{pub}/{year}/{pos}/text.html ---
@@ -49,6 +50,8 @@ EU_ACTS: dict[str, dict] = {
 _HEADERS = {"User-Agent": "legal-cite/0.1 (+https://github.com/apiotrowski-afk/legal-cite-pl)"}
 
 # cache per-proces: klucz aktu → tekst (strip HTML) całego aktu
+logger = logging.getLogger(__name__)
+
 _cache: dict[str, str] = {}
 
 
@@ -149,17 +152,41 @@ async def _fetch_pl(info: dict) -> str | None:
 
 
 async def _fetch_eu(info: dict) -> str | None:
+    """Pobiera polski tekst aktu UE — najpierw z CELLAR, potem z EUR-Lex.
+
+    Publiczna strona EUR-Lex stoi za WAF-em, który odpowiada 202 zamiast
+    treści. Blokada nie jest stała: na tym samym kliencie potrafi włączyć się
+    w ciągu dnia, więc nie da się jej obejść retrajem ani nagłówkiem. CELLAR
+    to interfejs maszynowy Urzędu Publikacji z negocjacją treści — ten sam
+    dokument, bez bramki dla przeglądarek.
+    """
     key = f"EU:{info['celex']}"
     if key in _cache:
         return _cache[key]
-    url = (f"https://eur-lex.europa.eu/legal-content/PL/TXT/HTML/"
-           f"?uri=CELEX:{info['celex']}")
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30, headers=_HEADERS) as c:
-        resp = await c.get(url)
-    if resp.status_code != 200:
-        return None
-    _cache[key] = _strip_html(resp.text)
-    return _cache[key]
+
+    zrodla = (
+        ("CELLAR",
+         f"http://publications.europa.eu/resource/celex/{info['celex']}",
+         {**_HEADERS, "Accept": "application/xhtml+xml", "Accept-Language": "pl"}),
+        ("EUR-Lex",
+         f"https://eur-lex.europa.eu/legal-content/PL/TXT/HTML/?uri=CELEX:{info['celex']}",
+         _HEADERS),
+    )
+    for nazwa, url, headers in zrodla:
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=30,
+                                         headers=headers) as c:
+                resp = await c.get(url)
+        except httpx.HTTPError:
+            continue
+        # 202 = bramka WAF EUR-Lexu zwracająca stronę-wyzwanie zamiast aktu
+        if resp.status_code != 200 or len(resp.text) < 10_000:
+            logger.info("zrodlo=%s celex=%s http=%s dlugosc=%s — probuje dalej",
+                        nazwa, info["celex"], resp.status_code, len(resp.text))
+            continue
+        _cache[key] = _strip_html(resp.text)
+        return _cache[key]
+    return None
 
 
 def _cut_ustep(art_text: str, ustep: str) -> str | None:
