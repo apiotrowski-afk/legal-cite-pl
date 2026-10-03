@@ -173,17 +173,93 @@ def _cut_ustep(art_text: str, ustep: str) -> str | None:
     return art_text[ust_start:ust_end].strip()
 
 
+# Minimalna wiarygodna długość treści artykułu. Poniżej tego progu wycinek
+# jest niemal na pewno odesłaniem albo pozycją spisu treści, nie przepisem.
+_MIN_TRESC = 25
+
+
+def _wiarygodny(art_text: str) -> bool:
+    """Czy wycinek wygląda na treść przepisu, a nie na odesłanie lub śmieć.
+
+    Narzędzie ma przeciwdziałać halucynacjom, więc cicha nieprawidłowość jest
+    gorsza niż jawna odmowa — przy wątpliwości wolimy nie zwrócić nic.
+    """
+    # po odcięciu samego nagłówka „Art. N." musi zostać realna treść
+    body = re.sub(r'^(?:Art\.|§)\s*[\d\sa-zA-Z]+\.', '', art_text, count=1).strip()
+    # Przepis uchylony albo skreślony to prawidłowa odpowiedź, nie śmieć —
+    # użytkownik ma się dowiedzieć, że artykuł nie obowiązuje.
+    if re.match(r'^\(\s*(?:uchylon|skreślon|skreslon|pominięt|pominiet)\w*\s*\)', body, re.IGNORECASE):
+        return True
+    if len(body) < _MIN_TRESC:
+        return False
+    # Próg 30%, nie 50%: przepisy końcowe i odsyłające są gęste od numerów
+    # artykułów i adresów publikacyjnych (47-48% liter), a odesłanie-śmieć
+    # w rodzaju 'art. 1. ” „' ma liter zero.
+    litery = sum(c.isalpha() for c in body)
+    return litery >= len(body) * 0.3
+
+
+def _wybierz_po_sasiadach(text: str, art: str, kand: list) -> list:
+    """Zostawia kandydata najlepiej wpasowanego między art. N-1 a art. N+1.
+
+    Tekst jednolity zawiera na końcu przepisy przejściowe ustaw nowelizujących
+    z własną numeracją od „Art. 1.", więc ten sam numer bywa w pliku dwa razy.
+    Artykuły właściwego aktu idą po kolei i stoją blisko siebie, dlatego
+    wybieramy wycinek o najmniejszej sumie odległości do sąsiadów. Sam warunek
+    „leży pomiędzy" nie wystarcza, bo sąsiad również bywa zdublowany.
+    """
+    m = re.match(r'^(\d+)$', art.strip())
+    if not m:
+        return kand
+    n = int(m.group(1))
+
+    def poz(numer: int) -> list[int]:
+        if numer < 1:
+            return []
+        return [x.start() for x in re.finditer(rf'Art\.\s*{numer}\s*\.', text)]
+
+    przed, po = poz(n - 1), poz(n + 1)
+    if not przed and not po:
+        return kand
+
+    def odleglosc(k) -> int:
+        start = k[1]
+        d = 0
+        wczesniejsze = [p for p in przed if p < start]
+        pozniejsze = [q for q in po if q > start]
+        d += start - max(wczesniejsze) if wczesniejsze else 10 ** 7
+        d += min(pozniejsze) - start if pozniejsze else 10 ** 7
+        return d
+
+    return [min(kand, key=odleglosc)]
+
+
 def extract_pl_article(text: str, art: str, ustep: str | None) -> str | None:
     frag = _art_regex(art)
-    for prefix in (rf'Art\.\s*{frag}\s*\.', rf'§\s*{frag}\s*\.'):
-        m = re.search(prefix, text, re.IGNORECASE)
-        if m:
+    # Nagłówek artykułu zaczyna się WIELKĄ literą („Art. 1."); małe „art. 1."
+    # to odesłanie wewnątrz zdania. Bez tego rozróżnienia re.search trafiał
+    # w pierwsze odesłanie zamiast w przepis.
+    kand = []
+    # Granica końca musi być jednostką TEJ SAMEJ rangi co początek: artykuł
+    # kończy się na następnym artykule, nie na własnym paragrafie.
+    for prefix, granica in ((rf'Art\.\s*{frag}\s*\.', r'\bArt\.\s*\d+'),
+                            (rf'§\s*{frag}\s*\.', r'§\s*\d+')):
+        for m in re.finditer(prefix, text):
+            nxt = re.search(granica, text[m.end():])
+            end = m.end() + nxt.start() if nxt else min(m.start() + 4000, len(text))
+            kand.append((end - m.start(), m.start(), end))
+        if kand:
             break
-    else:
+    if not kand:
         return None
-    nxt = re.search(r'\b(?:Art\.|§)\s*\d+', text[m.end():])
-    end = m.end() + nxt.start() if nxt else min(m.start() + 4000, len(text))
-    art_text = text[m.start():end].strip()
+    if len(kand) > 1:
+        kand = _wybierz_po_sasiadach(text, art, kand)
+    # Gdy sąsiedzi nie rozstrzygają, bierzemy wycinek z najdłuższą treścią —
+    # odesłanie i pozycja spisu treści urywają się po kilku znakach.
+    _, start, end = max(kand)
+    art_text = text[start:end].strip()
+    if not _wiarygodny(art_text):
+        return None
     return _cut_ustep(art_text, ustep) if ustep else art_text
 
 
