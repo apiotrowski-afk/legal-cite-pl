@@ -8,6 +8,7 @@ nie pierwotne z dnia ogłoszenia.
 from __future__ import annotations
 
 import bisect
+import datetime as _dt
 import html as _html
 import re
 
@@ -59,6 +60,7 @@ _cache: dict[str, str] = {}
 # po tekście, więc wycinanie artykułu idzie najpierw po nich
 _html_cache: dict[str, str] = {}
 _jedn_cache: dict[str, list] = {}
+_odn_cache: dict[str, dict] = {}
 # (klucz aktu, numer po naprawie) → numer, jaki wydrukowało źródło
 _zlepki: dict[tuple[str, str], str] = {}
 
@@ -369,6 +371,59 @@ def _koniec_div(raw_html: str, start: int) -> int:
     return len(raw_html)
 
 
+_ODNOSNIK_RE = re.compile(
+    r'<a\b[^>]*class="[^"]*gloss-link[^"]*"[^>]*>\s*<sup>\s*(\d+)\s*\)\s*</sup>'
+    r'\s*<span class="tooltip-text">(.*?)</span>\s*</a>', re.IGNORECASE | re.DOTALL)
+_PIERWSZY_ODNOSNIK_RE = re.compile(
+    r'<a\b[^>]*class="[^"]*gloss-link[^"]*"[^>]*>\s*<sup>\s*(\d+)\s*\)\s*</sup>',
+    re.IGNORECASE)
+_DO_WEJSCIA_RE = re.compile(r'obowiązuje\s+do\s+wejścia\s+w\s+życie', re.IGNORECASE)
+_W_ZYCIE_RE = re.compile(
+    r'w\s+życie\s+(?:z\s+dniem\s+)?(\d{1,2})\s+([a-ząćęłńóśźż]+)\s+(\d{4})',
+    re.IGNORECASE)
+_ODESLANIE_RE = re.compile(r'odnośnik\w*\s+(\d+)', re.IGNORECASE)
+_MIESIACE = {'stycznia': 1, 'lutego': 2, 'marca': 3, 'kwietnia': 4, 'maja': 5,
+             'czerwca': 6, 'lipca': 7, 'sierpnia': 8, 'września': 9,
+             'października': 10, 'listopada': 11, 'grudnia': 12}
+
+
+def _odnosniki(key: str, raw_html: str) -> dict[str, str]:
+    """Numer odnośnika → jego treść. Źródło osadza treść przypisu w tooltipie
+    przy każdym wywołaniu, więc wystarczy jedno przejście po dokumencie."""
+    if key in _odn_cache:
+        return _odn_cache[key]
+    mapa: dict[str, str] = {}
+    for nr, tresc in _ODNOSNIK_RE.findall(raw_html):
+        mapa.setdefault(nr, _strip_html(tresc))
+    _odn_cache[key] = mapa
+    return mapa
+
+
+def _data_wejscia(mapa: dict[str, str], nr: str, krok: int = 0) -> _dt.date | None:
+    """Data, od której obowiązuje brzmienie opisane odnośnikiem nr.
+
+    Odnośnik bywa odesłaniem („Przez art. 26 pkt 3 ustawy, o której mowa w
+    odnośniku 3."), a data stoi dopiero w tym docelowym — dlatego idziemy po
+    łańcuchu. Odnośnik mówiący „obowiązuje DO wejścia w życie zmiany" opisuje
+    koniec, nie początek, więc nie daje daty.
+    """
+    tresc = mapa.get(nr)
+    if tresc is None or krok > 3:
+        return None
+    if _DO_WEJSCIA_RE.search(tresc):
+        return None
+    m = _W_ZYCIE_RE.search(tresc)
+    if m:
+        mies = _MIESIACE.get(m.group(2).lower())
+        if mies:
+            try:
+                return _dt.date(int(m.group(3)), mies, int(m.group(1)))
+            except ValueError:
+                return None
+    dalej = _ODESLANIE_RE.search(tresc)
+    return _data_wejscia(mapa, dalej.group(1), krok + 1) if dalej else None
+
+
 def _kanon_art(raw_art: str) -> str | None:
     """Numer artykułu w zapisie, jakim posługuje się źródło w data-id:
     385¹/385[1]/385(1) → '385_1', 36a → '36a', 45 → '45'."""
@@ -378,7 +433,7 @@ def _kanon_art(raw_art: str) -> str | None:
     return s if re.fullmatch(r'\d+[a-ząćęłńóśźż]*(?:_\d+[a-ząćęłńóśźż]?)*', s) else None
 
 
-def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str]]:
+def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | None]]:
     """Artykuły właściwego aktu wg znaczników źródła, w kolejności dokumentu.
 
     Pomija przepisy przejściowe ustaw nowelizujących — źródło oznacza je
@@ -386,19 +441,21 @@ def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str]]:
     """
     if key in _jedn_cache:
         return _jedn_cache[key]
-    ms = list(_UNIT_RE.finditer(raw_html))
+    mapa = _odnosniki(key, raw_html)
     out = []
-    for m in ms:
+    for m in _UNIT_RE.finditer(raw_html):
         if 'pass_' in m.group(1):
             continue
-        out.append((m.group(2).lower(),
-                    _strip_html(raw_html[m.start():_koniec_div(raw_html, m.start())])))
+        fragment = raw_html[m.start():_koniec_div(raw_html, m.start())]
+        odn = _PIERWSZY_ODNOSNIK_RE.search(fragment)
+        out.append((m.group(2).lower(), _strip_html(fragment),
+                    _data_wejscia(mapa, odn.group(1)) if odn else None))
     out = _napraw_zlepki(key, out)
     _jedn_cache[key] = out
     return out
 
 
-def _napraw_zlepki(key: str, jedn: list[tuple[str, str]]) -> list[tuple[str, str]]:
+def _napraw_zlepki(key: str, jedn: list[tuple]) -> list[tuple]:
     """Naprawia numer artykułu zlepiony z numerem odnośnika.
 
     Źródło drukuje art. 15 k.p.c. jako „Art. 15.22)" i oddaje w znaczniku
@@ -407,7 +464,7 @@ def _napraw_zlepki(key: str, jedn: list[tuple[str, str]]) -> list[tuple[str, str
     dokładnie między sąsiadami — na 5804 artykułach dwunastu aktów taki
     przypadek jest jeden, więc warunek jest wąski, a nie zgadywanie.
     """
-    bazy = [int(re.match(r'(\d+)', n).group(1)) for n, _ in jedn]
+    bazy = [int(re.match(r'(\d+)', n).group(1)) for n, *_ in jedn]
     for i in range(1, len(jedn) - 1):
         if bazy[i - 1] < bazy[i] < bazy[i + 1]:
             continue
@@ -418,7 +475,7 @@ def _napraw_zlepki(key: str, jedn: list[tuple[str, str]]) -> list[tuple[str, str
         for k in range(1, len(cyfry)):
             if bazy[i - 1] < int(cyfry[:k]) < bazy[i + 1]:
                 _zlepki[(key, cyfry[:k])] = cyfry
-                jedn[i] = (cyfry[:k], jedn[i][1])
+                jedn[i] = (cyfry[:k],) + jedn[i][1:]
                 break
     return jedn
 
@@ -428,36 +485,60 @@ def extract_pl_article_html(key: str, raw_html: str, art: str,
     """Wycina artykuł po znacznikach jednostek redakcyjnych źródła.
 
     Pewniejsze niż szukanie nagłówka „Art. N." w tekście: nie łapie spisu
-    treści ani odesłań i nie wymaga zgadywania, gdzie kończy się akt. Osobno
-    rozstrzyga przypadek, w którym tekst jednolity podaje DWA brzmienia tego
-    samego artykułu — obowiązujące i to, które wejdzie w życie z nowelizacją.
-    Źródło drukuje obowiązujące jako pierwsze; wybór „najdłuższego wycinka"
-    trafiał tu w brzmienie przyszłe (art. 3b u.ś.u.d.e.: 246 znaków
-    obowiązujących kontra 2044 znaki przyszłe).
+    treści ani odesłań i nie wymaga zgadywania, gdzie kończy się akt.
+
+    Osobno rozstrzyga przypadek, w którym tekst jednolity drukuje DWA brzmienia
+    tego samego artykułu. O tym, które obowiązuje, decyduje data z odnośnika, a
+    nie kolejność druku ani długość wycinka — bo tekst jednolity zamraża stan
+    prawny na dzień obwieszczenia, a nowelizacja mogła wejść w życie później.
+    Art. 479(45) k.p.c.: drugie brzemienie („uchylony") obowiązuje od
+    18.04.2026, więc pierwsze jest dziś nieaktualne. Art. 10 i 24 u.ś.u.d.e.
+    oraz art. 3b i 25 u.ś.u.d.e.: drugie brzmienie obowiązuje od 10.11.2024
+    (wejście w życie Prawa komunikacji elektronicznej), a tekst jednolity jest
+    z 10.10.2024 — miesiąc wcześniej.
     """
     klucz = _kanon_art(art)
     if not klucz:
         return None
-    trafienia = [t for n, t in _jednostki_html(key, raw_html) if n == klucz]
+    trafienia = [(t, d) for n, t, d in _jednostki_html(key, raw_html) if n == klucz]
     if not trafienia:
         return None
-    tekst = trafienia[0]
+
+    dzis = _dt.date.today()
+    wybor, nieznane = 0, False
+    if len(trafienia) > 1:
+        for i, (_, data) in enumerate(trafienia[1:], start=1):
+            if data is None:
+                nieznane = True
+            elif data <= dzis:
+                wybor = i
+    tekst, data_wyboru = trafienia[wybor]
     if not _wiarygodny(tekst):
         return None
     if ustep:
         tekst = _cut_ustep(tekst, ustep)
         if not tekst:
             return None
+
     zlepek = _zlepki.get((key, klucz))
     if zlepek:
         tekst += (f"\n\n⚠ Źródło drukuje numer tego artykułu zlepiony z numerem "
                   f"odnośnika („Art. {zlepek}.”). Powyżej treść art. {klucz} "
                   f"— numer odczytany z kolejności artykułów w akcie.")
     if len(trafienia) > 1:
-        tekst += (f"\n\n⚠ Tekst jednolity podaje {len(trafienia)} brzmienia tego "
-                  f"artykułu. Powyżej jest brzmienie obowiązujące; pozostałe wchodzą "
-                  f"w życie z nowelizacją (odnośniki w Dz.U.).")
+        tekst += f"\n\n⚠ Tekst jednolity drukuje {len(trafienia)} brzmienia tego artykułu. "
+        tekst += (f"Powyżej brzmienie obowiązujące od {data_wyboru:%d.%m.%Y}."
+                  if data_wyboru else
+                  "Powyżej brzmienie obowiązujące w dniu tego tekstu jednolitego.")
+        przyszle = [d for _, d in trafienia if d and d > dzis]
+        if przyszle:
+            tekst += (" Kolejne wchodzi w życie "
+                      + ", ".join(f"{d:%d.%m.%Y}" for d in sorted(przyszle)) + ".")
+        if nieznane:
+            tekst += (" Przy co najmniej jednym brzmieniu nie udało się odczytać daty "
+                      "wejścia w życie z odnośnika — sprawdź odnośniki w Dz.U.")
     return tekst
+
 
 
 def extract_pl_article(text: str, art: str, ustep: str | None) -> str | None:

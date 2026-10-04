@@ -36,11 +36,12 @@ async def main():
         info = core.PL_ACTS[kod]
         core._cache.clear(); core._html_cache.clear()
         core._jedn_cache.clear(); core._trzon_cache.clear()
+        core._odn_cache.clear(); core._zlepki.clear()
         text = await core._fetch_pl(info)
         key = core._klucz_pl(info)
         raw = core._html_cache[key]
         w = dict(zgoda=0, tylko_struktura=0, tylko_tekst=0, rozne=0, brak_obu=0)
-        for num, _ in core._jednostki_html(key, raw):
+        for num, *_ in core._jednostki_html(key, raw):
             art = cytat(num)
             if not art:
                 continue
