@@ -28,11 +28,17 @@ mcp = FastMCP("legal-cite")
 @mcp.tool()
 async def verify_article(citation: str) -> str:
     """Dokładne brzmienie cytowanego przepisu z OFICJALNEGO źródła
-    (api.sejm.gov.pl dla PL, EUR-Lex dla UE) — zwraca tylko ten artykuł,
-    nie cały akt. Zwraca AKTUALNE brzmienie (tekst jednolity).
+    (api.sejm.gov.pl dla PL, EUR-Lex/CELLAR dla UE) — zwraca tylko ten
+    artykuł, nie cały akt, z NAJNOWSZEGO tekstu jednolitego.
     Anti-halucynacja: weryfikacja cytatu wprost ze źródła.
+    Wynik mówi, czym jest: 📜 tekst urzędowy (HTML) albo 📄 NIEURZĘDOWY
+    odczyt z urzędowego PDF (gdy API ELI daje najnowszy t.j. tylko w PDF),
+    po kontroli drugim czytnikiem i starszym t.j.; osobno ocena aktualności
+    (nowelizacje po dacie t.j.). Linia „[dla modelu]” podaje te oceny jako
+    pola — nie nazywaj odczytu PDF tekstem urzędowym. Przy wątpliwości
+    narzędzie ODMAWIA zamiast podać starsze brzmienie.
     Format: 'art. N [ust. M] KOD'. Przykłady: 'art. 45 u.k.k.',
-    'art. 385 KC', 'art. 28 ust. 3 RODO', 'art. 10 CCD'. Kody: list_acts()."""
+    'art. 385¹ KC', 'art. 18[3d] KP', 'art. 28 ust. 3 RODO'. Kody: list_acts()."""
     try:
         return await core.verify_article(citation)
     except Exception as e:

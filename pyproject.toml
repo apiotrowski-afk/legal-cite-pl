@@ -6,6 +6,9 @@ requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.2,<2",
     "httpx>=0.27",
+    # konwerter PDF→Markdown dla tekstów jednolitych bez HTML; wersja PRZYPIĘTA,
+    # bo od niej zależy powtarzalność odczytu (klucz cache = sha PDF + wersja)
+    "eli2md @ git+https://github.com/PolskiAgentW/eli2md@v0.6.49",
 ]
 
 [project.scripts]

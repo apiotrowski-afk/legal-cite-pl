@@ -88,7 +88,7 @@ def parse_citation(raw: str) -> dict | None:
     jednostkę redakcyjną (KC numeruje paragrafami)."""
     m = re.match(
         r'(?:art\.|§)\s*'
-        r'(\d+[a-z]?(?:\s*(?:[¹²³⁴⁵⁶⁷⁸⁹]+|\[\d+\]|\(\d+\)|\^\d+))?)\s*'  # numer art. + opc. indeks
+        r'(\d+[a-z]?(?:\s*(?:[¹²³⁴⁵⁶⁷⁸⁹]+|\[\d+[a-z]?\]|\(\d+[a-z]?\)|\^\d+))?)\s*'  # numer art. + opc. indeks (385¹, 18[3d])
         r'(?:(?:ust\.|§)\s*(\d+\w?))?\s*'                                 # ustęp ALBO paragraf
         r'(?:(?:pkt|lit\.)\s*\S+\s*)?(.+)',                               # pkt/lit ignorowane; kod aktu
         raw.strip(), re.IGNORECASE,
@@ -138,52 +138,82 @@ def _strip_html(raw_html: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
-async def _fetch_pl(info: dict) -> str | None:
-    """Pobiera AKTUALNY tekst aktu (tekst jednolity), nie pierwotny z dnia
-    ogłoszenia. api.sejm `/text.html` pod pozycją oryginału zwraca brzmienie
-    pierwotne (np. KC 1964 — „PRL", bez art. 385¹). Dlatego z metadanych bierzemy
-    najnowszy tekst jednolity z dostępnym HTML; oryginał = fallback."""
+_tj_cache: dict[str, list[dict]] = {}
+
+
+async def _teksty_jednolite(info: dict) -> list[dict]:
+    """Teksty jednolite aktu od najnowszego, z informacją, czy API daje HTML.
+
+    Kolejność ustala numer pozycji w Dz.U., nie kolejność z metadanych. Każdy
+    wpis: {id, html (bool), html_text, meta}. Wpisy sprawdzane są po kolei
+    aż do pierwszego z HTML — starsze nie są potrzebne. Od 2025 r. API ELI
+    nie publikuje HTML dla Dz.U., więc najnowszy wpis bywa tylko w PDF, a
+    pierwszy z HTML jest o rok lub dwa starszy. Na końcu listy oryginał aktu.
+    """
     key = _klucz_pl(info)
-    if key in _cache:
-        return _cache[key]
+    if key in _tj_cache:
+        return _tj_cache[key]
     base = "https://api.sejm.gov.pl/eli/acts"
+    out: list[dict] = []
     async with httpx.AsyncClient(follow_redirects=True, timeout=25, headers=_HEADERS) as c:
-        positions: list[tuple] = []
+        idents: list[str] = []
         zmieniajace: list[dict] = []
         try:
             meta = (await c.get(f"{base}/{info['pub']}/{info['year']}/{info['pos']}")).json()
             for ent in (meta.get("references") or {}).get("Inf. o tekście jednolitym", []):
                 parts = (ent.get("id") or "").split("/")
-                if len(parts) == 3:
-                    positions.append(tuple(parts))  # (pub, year, pos) tekstu jednolitego
+                if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+                    idents.append("/".join(parts))
             zmieniajace = (meta.get("references") or {}).get("Akty zmieniające", [])
         except Exception:
             pass
-        positions = positions[:4]  # najnowsze TJ (świeże bywają bez HTML — pomijamy puste)
-        positions.append((info["pub"], str(info["year"]), str(info["pos"])))  # fallback oryginał
-        for pub, year, pos in positions:
+        idents = sorted(set(idents), key=lambda s: (int(s.split("/")[1]), int(s.split("/")[2])),
+                        reverse=True)[:4]
+        idents.append(f"{info['pub']}/{info['year']}/{info['pos']}")  # fallback: oryginał
+        for ident in idents:
+            wpis = {"id": ident, "html": False, "html_text": None, "meta": {},
+                    "zmieniajace": zmieniajace}
             try:
-                resp = await c.get(f"{base}/{pub}/{year}/{pos}/text.html")
+                wpis["meta"] = (await c.get(f"{base}/{ident}")).json()
             except Exception:
-                continue
-            if resp.status_code == 200 and len(resp.text) > 3000:
-                text = _strip_html(resp.text)
-                if len(text) > 1500:
-                    _cache[key] = text
-                    _html_cache[key] = resp.text
-                    # data tego TJ i liczba nowelizacji po niej — liczone tutaj,
-                    # bo metadane są już pobrane; osobne zapytania przy każdym
-                    # cytacie byłyby wolne i zawodne
-                    data = ""
-                    try:
-                        data = ((await c.get(f"{base}/{pub}/{year}/{pos}"))
-                                .json().get("announcementDate") or "")
-                    except Exception:
-                        pass
-                    po = sum(1 for e in zmieniajace
-                             if data and (e.get("date") or "") > data)
-                    _zrodlo[key] = (f"{pub}/{year}/{pos}", data, po)
-                    return text
+                pass
+            try:
+                resp = await c.get(f"{base}/{ident}/text.html")
+                if resp.status_code == 200 and len(resp.text) > 3000 \
+                        and len(_strip_html(resp.text)) > 1500:
+                    wpis["html"], wpis["html_text"] = True, resp.text
+            except Exception:
+                pass
+            out.append(wpis)
+            if wpis["html"]:
+                break
+    _tj_cache[key] = out
+    return out
+
+
+def _nowelizacje_po(zmieniajace: list[dict], data: str) -> int:
+    """Liczba aktów zmieniających, które weszły w życie po dacie data
+    (pole date w API ELI to data wejścia w życie zmiany)."""
+    return sum(1 for e in zmieniajace if data and (e.get("date") or "") > data)
+
+
+async def _fetch_pl(info: dict) -> str | None:
+    """Pobiera tekst aktu z najnowszego tekstu jednolitego, który API daje w
+    HTML (nie pierwotny z dnia ogłoszenia: `/text.html` pod pozycją oryginału
+    zwraca brzmienie z 1964 r.). Gdy najnowszy t.j. jest tylko w PDF, ten
+    HTML jest starszy — o tym decyduje verify_article, nie ta funkcja."""
+    key = _klucz_pl(info)
+    if key in _cache:
+        return _cache[key]
+    for wpis in await _teksty_jednolite(info):
+        if not wpis["html"]:
+            continue
+        text = _strip_html(wpis["html_text"])
+        _cache[key] = text
+        _html_cache[key] = wpis["html_text"]
+        data = wpis["meta"].get("announcementDate") or ""
+        _zrodlo[key] = (wpis["id"], data, _nowelizacje_po(wpis["zmieniajace"], data))
+        return text
     return None
 
 
@@ -429,7 +459,7 @@ def _kanon_art(raw_art: str) -> str | None:
     385¹/385[1]/385(1) → '385_1', 36a → '36a', 45 → '45'."""
     s = re.sub(r'\s+', '', raw_art.strip())
     s = re.sub(r'([¹²³⁴⁵⁶⁷⁸⁹⁰]+)', lambda m: '_' + m.group(1).translate(_SUP), s)
-    s = re.sub(r'[\[\(\^]\s*(\d+)\s*[\]\)]?', r'_\1', s).lower()
+    s = re.sub(r'[\[\(\^]\s*(\d+[a-z]?)\s*[\]\)]?', r'_\1', s).lower()
     return s if re.fullmatch(r'\d+[a-ząćęłńóśźż]*(?:_\d+[a-ząćęłńóśźż]?)*', s) else None
 
 
@@ -620,6 +650,221 @@ def _podstawa_tekstu(info: dict) -> str:
     return opis + ")"
 
 
+def _odmiana_nowelizacji(n: int) -> str:
+    if n == 1:
+        return "1 nowelizacja"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f"{n} nowelizacje"
+    return f"{n} nowelizacji"
+
+
+def _nowelizacje_miedzy(zmieniajace: list[dict], od: str, do: str) -> int:
+    return sum(1 for e in zmieniajace
+               if od and do and od < (e.get("date") or "") <= do)
+
+
+def _wybierz_brzmienie(trafienia: list, dzis: _dt.date) -> tuple[int, bool]:
+    """Indeks brzmienia obowiązującego dziś spośród kilku wydrukowanych (po dacie
+    z odnośnika; przy nieznanej dacie zostaje pierwsze) i flaga, czy jakaś data
+    była nieczytelna."""
+    wybor, nieznane = 0, False
+    for i, data in enumerate(trafienia[1:], start=1):
+        if data is None:
+            nieznane = True
+        elif data <= dzis:
+            wybor = i
+    return wybor, nieznane
+
+
+async def _odpowiedz_pl(info: dict, art: str, ustep: str | None, ref: str) -> str:
+    """Brzmienie przepisu PL. Najpierw WERSJA, potem format: podstawą jest
+    najnowszy tekst jednolity. Gdy API daje go w HTML — ścieżka urzędowego
+    HTML. Gdy tylko w PDF — nieurzędowy odczyt PDF z kontrolami (pdf_tj).
+    Starszy HTML sam w sobie nie jest odpowiedzią na pytanie o aktualne
+    brzmienie, więc przy odmowie nie jest podawany."""
+    tj = await _teksty_jednolite(info)
+    if not tj:
+        return f"❌ Nie udało się pobrać metadanych {info['name']} z api.sejm.gov.pl"
+    najnowszy = tj[0]
+    if najnowszy["html"]:
+        text = await _fetch_pl(info)
+        if text is None:
+            return f"❌ Nie udało się pobrać {info['name']} (sieć/ELI)"
+        key = _klucz_pl(info)
+        raw = _html_cache.get(key)
+        result = extract_pl_article_html(key, raw, art, ustep) if raw else None
+        if result is None:
+            result = extract_pl_article(text, art, ustep)
+        if not result:
+            return f"❌ {ref} nie znaleziony w {info['name']}. Sprawdź numer artykułu."
+        podstawa = _podstawa_tekstu(info)
+        return (f"📜 **{info['name']}**, {ref}\n(źródło: api.sejm.gov.pl, tekst urzędowy HTML)"
+                f"{podstawa}\n\n{result}")
+    return await _odpowiedz_pdf(info, tj, art, ustep, ref)
+
+
+def _odmowa_pdf(info: dict, ref: str, ident: str, adres: str, url_pdf: str, powod: str,
+                starszy: str | None) -> str:
+    tekst = (f"❌ {ref} {info['name']}: najnowszy tekst jednolity ({adres}, {ident}) jest "
+             f"dostępny w API ELI tylko jako PDF, a nieurzędowy odczyt tego artykułu nie "
+             f"przeszedł kontroli: {powod}.")
+    if starszy:
+        tekst += (f" Starszego brzmienia z t.j. {starszy} (HTML) nie podaję, bo mogło "
+                  f"zostać zmienione.")
+    return tekst + f"\nSprawdź w urzędowym PDF: {url_pdf}"
+
+
+async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None,
+                         ref: str) -> str:
+    from legal_cite import pdf_tj
+
+    najnowszy = tj[0]
+    ident = najnowszy["id"]
+    pub, year, pos = ident.split("/")
+    url_pdf = f"https://api.sejm.gov.pl/eli/acts/{ident}/text.pdf"
+    adres = najnowszy["meta"].get("displayAddress") or ident
+    starszy = next((w for w in tj if w["html"]), None)
+    starszy_id = starszy["id"] if starszy else None
+
+    if not pdf_tj.konwerter_dostepny():
+        return _odmowa_pdf(info, ref, ident, adres, url_pdf,
+                           "konwerter eli2md nie jest zainstalowany po stronie serwera",
+                           starszy_id)
+    try:
+        od = await pdf_tj.odczyt(ident, najnowszy["meta"])
+    except Exception as e:  # sieć, uszkodzony PDF, błąd konwertera
+        logger.warning("odczyt pdf %s blad=%s", ident, type(e).__name__)
+        return _odmowa_pdf(info, ref, ident, adres, url_pdf,
+                           f"nie udało się pobrać lub skonwertować PDF ({type(e).__name__})",
+                           starszy_id)
+
+    klucz = _kanon_art(art)
+    if not klucz:
+        return f"❌ Nierozpoznany numer artykułu: '{art}'"
+    trafienia = od.znajdz(klucz)
+
+    # starszy tekst jednolity w HTML — niezależne źródło do porównania
+    html_teksty: list[str] = []
+    slownik: set[str] = set()
+    data_html = ""
+    if starszy:
+        await _fetch_pl(info)
+        key = _klucz_pl(info)
+        if key in _html_cache:
+            jedn = _jednostki_html(key, _html_cache[key])
+            html_teksty = [t for n, t, _ in jedn if n == klucz]
+            slownik = pdf_tj.slownik_html(t for _, t, _ in jedn)
+        data_html = starszy["meta"].get("announcementDate") or ""
+
+    if not trafienia:
+        if html_teksty:
+            return _odmowa_pdf(info, ref, ident, adres, url_pdf,
+                               "artykuł jest w starszym tekście jednolitym, a w odczycie "
+                               "najnowszego go nie ma", starszy_id)
+        return f"❌ {ref} nie znaleziony w {info['name']} ({adres}). Sprawdź numer artykułu."
+    if not od.monotoniczne:
+        return _odmowa_pdf(info, ref, ident, adres, url_pdf,
+                           "numery artykułów w odczycie nie rosną w kolejności dokumentu, "
+                           "więc granicom artykułów nie można ufać", starszy_id)
+
+    dzis = _dt.date.today()
+    wybor, nieznane = _wybierz_brzmienie([j.data for j in trafienia], dzis)
+    jedn = trafienia[wybor]
+
+    # kontrola 1: starszy urzędowy HTML
+    rel = pdf_tj.porownaj_z_html(jedn, html_teksty)
+    zmieniajace = najnowszy.get("zmieniajace") or []
+    # kontrola 2: warstwa tekstowa PDF drugim czytnikiem
+    if od.raw_tok:
+        w = pdf_tj.wiernosc_pdftotext(jedn, od.raw_tok, od.dozwolone)
+        kontrola_pdf = "zaliczona" if w.ok else f"niezaliczona ({w.powod})"
+    else:
+        w = None
+        kontrola_pdf = "niewykonana (brak pdftotext na serwerze)"
+
+    if rel == "identyczny":
+        # Dwa niezależne źródła dają te same słowa: podajemy tekst urzędowy
+        # (HTML), a najnowszy t.j. potwierdza, że artykuł się nie zmienił.
+        tekst = next(h for h in html_teksty
+                     if "".join(pdf_tj.tokeny(h)) == "".join(pdf_tj.tokeny(jedn.tekst)))
+        zrodlo = "urzedowy_html"
+        wiernosc = "potwierdzona_identycznym_brzmieniem_w_najnowszym_tj"
+        naglowek = (f"(źródło: api.sejm.gov.pl, tekst urzędowy HTML t.j. {starszy_id}; "
+                    f"brzmienie identyczne w najnowszym t.j. {adres} z {od.data_tj}, "
+                    f"dostępnym tylko w PDF — odczyt {od.konwerter}, kontrola pdftotext: "
+                    f"{kontrola_pdf})")
+    else:
+        if w is None or not w.ok:
+            return _odmowa_pdf(info, ref, ident, adres, url_pdf,
+                               f"kontrola warstwy tekstowej PDF {kontrola_pdf}", starszy_id)
+        if rel == "rozny":
+            miedzy = _nowelizacje_miedzy(zmieniajace, data_html, od.data_tj)
+            if jedn.odnosniki:
+                wyjasnienie = ("odnośnik przy jednostce: "
+                               + (od.przypisy.get(jedn.odnosniki[0]) or "")[:160])
+            elif miedzy:
+                wyjasnienie = (f"między t.j. {starszy_id} ({data_html}) a tym t.j. weszło "
+                               f"w życie {_odmiana_nowelizacji(miedzy)}")
+            else:
+                return _odmowa_pdf(info, ref, ident, adres, url_pdf,
+                                   f"brzmienie różni się od t.j. {starszy_id} (HTML), a ani "
+                                   "odnośnik, ani wykaz nowelizacji tej różnicy nie tłumaczą",
+                                   starszy_id)
+            opis_html = f"różne od t.j. {starszy_id} (HTML); {wyjasnienie}"
+        else:
+            opis_html = (f"artykułu nie ma w t.j. {starszy_id} (HTML) — dodany później"
+                         if starszy_id else "brak starszego t.j. w HTML do porównania")
+        tekst, ile = pdf_tj.napraw_sklejki(jedn.czysty(), slownik)
+        zrodlo = "nieurzedowy_odczyt_pdf"
+        wiernosc = "zaliczona_pdftotext"
+        naglowek = (f"(źródło: api.sejm.gov.pl, t.j. {adres} z {od.data_tj} — tylko PDF)\n"
+                    f"⚠ NIEURZĘDOWY ODCZYT z urzędowego PDF: {od.konwerter}; "
+                    f"PDF sha256 {od.sha256[:16]}…; wiążący jest PDF: {url_pdf}\n"
+                    f"Kontrola odczytu: warstwa tekstowa PDF ({od.pdftotext}) — {kontrola_pdf}; "
+                    f"względem starszego t.j.: {opis_html}"
+                    + (f"; rozdzielono {ile} wyrazów sklejonych w warstwie PDF" if ile else "")
+                    + ")")
+
+    if ustep:
+        tekst = _cut_ustep(tekst, ustep)
+        if not tekst:
+            return f"❌ {ref} nie znaleziony w {info['name']} ({adres}). Sprawdź numer ustępu."
+
+    po = _nowelizacje_po(zmieniajace, od.data_tj)
+    if po:
+        aktualnosc = (f"nieustalona — po dacie tego t.j. ({od.data_tj}) weszło w życie "
+                      f"{_odmiana_nowelizacji(po)}; sprawdź, czy dotyczy to tego artykułu")
+        akt_kod = f"nieustalona_{po}_nowelizacji_po_tj"
+    else:
+        aktualnosc = (f"wg wykazu aktów zmieniających w API ELI po dacie tego t.j. "
+                      f"({od.data_tj}) nie weszła w życie żadna nowelizacja")
+        akt_kod = "potwierdzona_wg_wykazu_eli"
+
+    uwagi = ""
+    if len(trafienia) > 1:
+        uwagi += f"\n\n⚠ Tekst jednolity drukuje {len(trafienia)} brzmienia tego artykułu. "
+        uwagi += (f"Powyżej brzmienie obowiązujące od {jedn.data:%d.%m.%Y}."
+                  if jedn.data else
+                  "Powyżej brzmienie obowiązujące w dniu tego tekstu jednolitego.")
+        przyszle = [j.data for j in trafienia if j.data and j.data > dzis]
+        if przyszle:
+            uwagi += (" Kolejne wchodzi w życie "
+                      + ", ".join(f"{d:%d.%m.%Y}" for d in sorted(przyszle)) + ".")
+        if nieznane:
+            uwagi += (" Przy co najmniej jednym brzmieniu nie udało się odczytać daty "
+                      "wejścia w życie z odnośnika — sprawdź odnośniki w Dz.U.")
+
+    znacznik = "📜" if zrodlo == "urzedowy_html" else "📄"
+    cytuj = (f"tekst urzędowy, t.j. {starszy_id}, potwierdzony w {adres}"
+             if zrodlo == "urzedowy_html" else
+             f"nieurzędowy odczyt {adres} (PDF), nie tekst urzędowy")
+    return (f"{znacznik} **{info['name']}**, {ref}\n{naglowek}\n"
+            f"Aktualność: {aktualnosc}\n\n{tekst}{uwagi}\n\n"
+            f"[dla modelu] zrodlo={zrodlo}; wiernosc={wiernosc}; aktualnosc={akt_kod}; "
+            f"cytuj_jako=„{cytuj}”; nie_nazywaj_tekstem_urzedowym="
+            f"{'nie_dotyczy' if zrodlo == 'urzedowy_html' else 'tak'}")
+
+
 async def verify_article(citation: str) -> str:
     """Zwraca dokładne brzmienie cytowanego przepisu ze źródła oficjalnego.
     Format: 'art. N [ust. M] KOD' (np. 'art. 45 u.k.k.', 'art. 28 ust. 3 RODO')."""
@@ -636,21 +881,9 @@ async def verify_article(citation: str) -> str:
     if pl_key:
         info = PL_ACTS[pl_key]
         try:
-            text = await _fetch_pl(info)
+            return await _odpowiedz_pl(info, art, ustep, ref)
         except httpx.TimeoutException:
             return f"❌ Timeout pobierania {info['name']} z api.sejm.gov.pl"
-        if text is None:
-            return f"❌ Nie udało się pobrać {info['name']} (sieć/ELI)"
-        key = _klucz_pl(info)
-        raw = _html_cache.get(key)
-        result = extract_pl_article_html(key, raw, art, ustep) if raw else None
-        if result is None:
-            result = extract_pl_article(text, art, ustep)
-        if not result:
-            return f"❌ {ref} nie znaleziony w {info['name']}. Sprawdź numer artykułu."
-        podstawa = _podstawa_tekstu(info)
-        return (f"📜 **{info['name']}**, {ref}\n(źródło: api.sejm.gov.pl)"
-                f"{podstawa}\n\n{result}")
 
     if eu_key:
         info = EU_ACTS[eu_key]
