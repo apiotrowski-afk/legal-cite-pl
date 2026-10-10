@@ -20,7 +20,7 @@ Fidelity checks before anything is returned (any failure → the tool refuses in
 
 Currency is a separate line: how many amending acts entered into force after the consolidated text's date (from the ELI register), or none. The trailing `[dla modelu]` line carries the same judgements as fields for an LLM reading the tool output.
 
-Measured on 2026-10-10 (8 acts whose newest consolidated text is PDF-only, 4676 articles): 99.7 % pass the text-layer check; of those also present in the older HTML, 4339 are word-for-word identical. Requirements: `pdftotext` (Debian/Ubuntu: `apt install poppler-utils`); without it the PDF path refuses. First conversion of a code takes 30–90 s and is cached on disk (`LEGAL_CITE_CACHE`, default under the system temp dir). On Cloud Run use at least `--memory=512Mi` and the default request timeout (300 s).
+Measured on 2026-10-10 (8 acts whose newest consolidated text is PDF-only, 4676 articles): 99.7 % pass the text-layer check; of those also present in the older HTML, 4339 are word-for-word identical. Requirements: `pdftotext` (Debian/Ubuntu: `apt install poppler-utils`); without it the PDF path refuses. First conversion of a code takes 30–90 s and is cached on disk (`LEGAL_CITE_CACHE`, default under the system temp dir). Optionally set `LEGAL_CITE_GCS_BUCKET` (and install `.[gcs]`) to keep conversions in Cloud Storage: a new instance downloads them instead of converting (file names carry the PDF checksum and converter version; fidelity checks run on the downloaded file as on a fresh one; any bucket error falls back to conversion). On Cloud Run use at least `--memory=512Mi` and the default request timeout (300 s).
 
 ---
 
@@ -75,7 +75,7 @@ Kontrole wierności przed oddaniem wyniku (każda niezaliczona → odmowa zamias
 
 Aktualność to osobna linia: ile aktów zmieniających weszło w życie po dacie tekstu jednolitego (wg wykazu ELI) albo że żaden. Linia `[dla modelu]` na końcu powtarza te oceny jako pola dla modelu czytającego wynik narzędzia.
 
-Pomiar 2026-10-10 (8 aktów z najnowszym t.j. tylko w PDF, 4676 artykułów): 99,7 % przechodzi kontrolę warstwy tekstowej; spośród obecnych w starszym HTML 4339 jest identycznych co do słowa. Wymagania: `pdftotext` (Debian/Ubuntu: `apt install poppler-utils`); bez niego ścieżka PDF odmawia. Pierwsza konwersja kodeksu trwa 30–90 s i jest trzymana na dysku (`LEGAL_CITE_CACHE`, domyślnie w katalogu tymczasowym systemu). Na Cloud Run co najmniej `--memory=512Mi`.
+Pomiar 2026-10-10 (8 aktów z najnowszym t.j. tylko w PDF, 4676 artykułów): 99,7 % przechodzi kontrolę warstwy tekstowej; spośród obecnych w starszym HTML 4339 jest identycznych co do słowa. Wymagania: `pdftotext` (Debian/Ubuntu: `apt install poppler-utils`); bez niego ścieżka PDF odmawia. Pierwsza konwersja kodeksu trwa 30–90 s i jest trzymana na dysku (`LEGAL_CITE_CACHE`, domyślnie w katalogu tymczasowym systemu). Opcjonalnie `LEGAL_CITE_GCS_BUCKET` (instalacja `.[gcs]`) trzyma konwersje w Cloud Storage: nowa instancja pobiera je zamiast konwertować (nazwa pliku zawiera sumę PDF i wersję konwertera; kontrole wierności biegną na pobranym pliku tak samo; błąd zasobnika = powrót do konwersji). Na Cloud Run co najmniej `--memory=512Mi`.
 - `list_acts()` — lista obsługiwanych kodów aktów (PL + UE).
 
 ### Uruchomienie lokalne (stdio — Claude Desktop / Claude Code)

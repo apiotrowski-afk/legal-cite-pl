@@ -11,6 +11,7 @@ import bisect
 import datetime as _dt
 import html as _html
 import re
+import time
 
 import logging
 import httpx
@@ -138,7 +139,11 @@ def _strip_html(raw_html: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
-_tj_cache: dict[str, list[dict]] = {}
+_tj_cache: dict[str, tuple[float, list[dict]]] = {}
+# Lista tekstów jednolitych jest ważna 6 godzin: nowy t.j. ogłoszony w tym
+# czasie musi się pojawić bez restartu instancji (przy stale włączonej
+# instancji restart bywa rzadki). Wynik z awarią API nie jest zapamiętywany.
+_TJ_TTL = 6 * 3600
 
 
 async def _teksty_jednolite(info: dict) -> list[dict]:
@@ -151,10 +156,11 @@ async def _teksty_jednolite(info: dict) -> list[dict]:
     pierwszy z HTML jest o rok lub dwa starszy. Na końcu listy oryginał aktu.
     """
     key = _klucz_pl(info)
-    if key in _tj_cache:
-        return _tj_cache[key]
+    if key in _tj_cache and time.monotonic() - _tj_cache[key][0] < _TJ_TTL:
+        return _tj_cache[key][1]
     base = "https://api.sejm.gov.pl/eli/acts"
     out: list[dict] = []
+    awaria = False
     async with httpx.AsyncClient(follow_redirects=True, timeout=25, headers=_HEADERS) as c:
         idents: list[str] = []
         zmieniajace: list[dict] = []
@@ -172,22 +178,30 @@ async def _teksty_jednolite(info: dict) -> list[dict]:
         idents.append(f"{info['pub']}/{info['year']}/{info['pos']}")  # fallback: oryginał
         for ident in idents:
             wpis = {"id": ident, "html": False, "html_text": None, "meta": {},
-                    "zmieniajace": zmieniajace}
+                    "zmieniajace": zmieniajace, "html_awaria": False}
             try:
                 wpis["meta"] = (await c.get(f"{base}/{ident}")).json()
             except Exception:
-                pass
+                awaria = True
+            # HTML istnieje tylko, gdy metadane tak mówią (textHTML); 5xx albo błąd
+            # sieci przy takim akcie to awaria API, nie brak HTML
             try:
                 resp = await c.get(f"{base}/{ident}/text.html")
                 if resp.status_code == 200 and len(resp.text) > 3000 \
                         and len(_strip_html(resp.text)) > 1500:
                     wpis["html"], wpis["html_text"] = True, resp.text
+                elif resp.status_code >= 500 and wpis["meta"].get("textHTML"):
+                    wpis["html_awaria"] = awaria = True
             except Exception:
-                pass
+                if wpis["meta"].get("textHTML"):
+                    wpis["html_awaria"] = awaria = True
             out.append(wpis)
             if wpis["html"]:
                 break
-    _tj_cache[key] = out
+    if awaria:
+        logger.warning("api eli awaria przy %s — lista t.j. nie trafia do cache", key)
+    else:
+        _tj_cache[key] = (time.monotonic(), out)
     return out
 
 
@@ -686,6 +700,10 @@ async def _odpowiedz_pl(info: dict, art: str, ustep: str | None, ref: str) -> st
     if not tj:
         return f"❌ Nie udało się pobrać metadanych {info['name']} z api.sejm.gov.pl"
     najnowszy = tj[0]
+    if najnowszy.get("html_awaria"):
+        return (f"❌ {ref} {info['name']}: API ELI Sejmu nie oddaje teraz tekstu HTML "
+                f"najnowszego tekstu jednolitego ({najnowszy['id']}) — awaria po stronie "
+                f"api.sejm.gov.pl. Spróbuj za chwilę.")
     if najnowszy["html"]:
         text = await _fetch_pl(info)
         if text is None:
@@ -812,6 +830,12 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
                                    starszy_id)
             opis_html = f"różne od t.j. {starszy_id} (HTML); {wyjasnienie}"
         else:
+            awaria_html = any(w.get("html_awaria") for w in tj)
+            if awaria_html and not starszy_id:
+                return _odmowa_pdf(info, ref, ident, adres, url_pdf,
+                                   "API ELI nie oddaje teraz starszego t.j. w HTML (awaria "
+                                   "api.sejm.gov.pl), więc nie da się wykonać porównania",
+                                   None)
             opis_html = (f"artykułu nie ma w t.j. {starszy_id} (HTML) — dodany później"
                          if starszy_id else "brak starszego t.j. w HTML do porównania")
         tekst, ile = pdf_tj.napraw_sklejki(jedn.czysty(), slownik)

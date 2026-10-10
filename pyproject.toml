@@ -11,6 +11,11 @@ dependencies = [
     "eli2md @ git+https://github.com/PolskiAgentW/eli2md@v0.6.49",
 ]
 
+[project.optional-dependencies]
+# trwały cache konwersji PDF w Cloud Storage (LEGAL_CITE_GCS_BUCKET); bez niego
+# narzędzie działa tak samo, tylko konwertuje od nowa na każdej nowej instancji
+gcs = ["google-cloud-storage>=2.10"]
+
 [project.scripts]
 legal-cite = "legal_cite.server:main"
 

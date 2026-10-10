@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils g
 WORKDIR /app
 COPY pyproject.toml ./
 COPY legal_cite ./legal_cite
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ".[gcs]"
 
 # Konwersje PDF (do ~1,5 min dla k.p.c.) są trzymane tutaj między wywołaniami
 ENV LEGAL_CITE_CACHE=/tmp/legal-cite

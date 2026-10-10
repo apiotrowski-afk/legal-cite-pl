@@ -34,6 +34,9 @@ async def main(kody):
         # starszy HTML do porównania
         text = await core._fetch_pl(info)
         key = core._klucz_pl(info)
+        if key not in core._zrodlo:
+            print(f"{kod}: API ELI nie oddaje starszego t.j. w HTML — pomiar pominięty")
+            continue
         html = core._jednostki_html(key, core._html_cache[key]) if key in core._html_cache else []
         po_num = collections.defaultdict(list)
         for n, t, _ in html:

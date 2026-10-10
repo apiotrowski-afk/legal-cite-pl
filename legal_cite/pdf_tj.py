@@ -389,22 +389,84 @@ _odczyty: dict[str, OdczytPDF] = {}
 _blokady: dict[str, asyncio.Lock] = {}
 
 
+# --- trwały cache w Cloud Storage (opcjonalny) ------------------------------
+#
+# Katalog CACHE_DIR jest per instancja: po wygaszeniu instancji Cloud Run
+# pierwsze zapytanie o kodeks znów konwertuje PDF (do ~2,5 min dla k.p.c.).
+# Gdy ustawiono LEGAL_CITE_GCS_BUCKET, gotowe konwersje i warstwa tekstowa są
+# trzymane także w zasobniku, pod tą samą nazwą co lokalnie — w nazwie jest
+# suma PDF (i wersja konwertera dla Markdown), więc plik z zasobnika odpowiada
+# dokładnie temu PDF i tej wersji konwertera. Kontrole wierności biegną na
+# pobranym pliku tak samo jak na świeżej konwersji. Każdy błąd zasobnika jest
+# tylko logowany: narzędzie wraca wtedy do konwersji, nigdy nie odmawia z jego
+# powodu. Bez zmiennej (domyślnie, np. instalacja lokalna) zasobnik nie jest używany.
+
+GCS_BUCKET = os.environ.get("LEGAL_CITE_GCS_BUCKET") or None
+GCS_PREFIX = "pdf-tj/"
+_gcs_bucket_obj = None
+
+
+def _gcs():
+    """Obiekt zasobnika albo None (brak zmiennej, brak biblioteki, błąd)."""
+    global _gcs_bucket_obj
+    if not GCS_BUCKET:
+        return None
+    if _gcs_bucket_obj is None:
+        try:
+            from google.cloud import storage
+            _gcs_bucket_obj = storage.Client().bucket(GCS_BUCKET)
+        except Exception as e:
+            logger.warning("gcs niedostepny bucket=%s blad=%s", GCS_BUCKET, type(e).__name__)
+            return None
+    return _gcs_bucket_obj
+
+
+def _gcs_pobierz(path: pathlib.Path) -> bool:
+    b = _gcs()
+    if b is None:
+        return False
+    try:
+        blob = b.blob(GCS_PREFIX + path.name)
+        if not blob.exists():
+            return False
+        blob.download_to_filename(str(path))
+        logger.info("gcs pobrano %s", path.name)
+        return True
+    except Exception as e:
+        logger.warning("gcs pobranie %s blad=%s", path.name, type(e).__name__)
+        path.unlink(missing_ok=True)
+        return False
+
+
+def _gcs_zapisz(path: pathlib.Path) -> None:
+    b = _gcs()
+    if b is None:
+        return
+    try:
+        b.blob(GCS_PREFIX + path.name).upload_from_filename(str(path))
+        logger.info("gcs zapisano %s", path.name)
+    except Exception as e:
+        logger.warning("gcs zapis %s blad=%s", path.name, type(e).__name__)
+
+
 def _konwertuj(pdf_path: pathlib.Path, md_path: pathlib.Path) -> str:
-    if md_path.exists():
+    if md_path.exists() or _gcs_pobierz(md_path):
         return md_path.read_text(encoding="utf-8")
     from eli2md.pdf import convert, to_markdown
     md = to_markdown(convert(str(pdf_path)))
     md_path.write_text(md, encoding="utf-8")
+    _gcs_zapisz(md_path)
     return md
 
 
 def _warstwa(pdf_path: pathlib.Path, txt_path: pathlib.Path) -> str | None:
-    if txt_path.exists():
+    if txt_path.exists() or _gcs_pobierz(txt_path):
         return txt_path.read_text(encoding="utf-8")
     if not shutil.which("pdftotext"):
         return None
     subprocess.run(["pdftotext", "-enc", "UTF-8", str(pdf_path), str(txt_path)],
                    check=True, timeout=120, capture_output=True)
+    _gcs_zapisz(txt_path)
     return txt_path.read_text(encoding="utf-8")
 
 
