@@ -47,7 +47,7 @@ gcloud run deploy legal-cite \
   --source=. \
   --region=europe-west4 \
   --allow-unauthenticated \
-  --memory=512Mi --cpu=1 --max-instances=2 --port=8080
+  --memory=512Mi --cpu=1 --max-instances=1 --timeout=300 --port=8080
 ```
 Public, no-auth is safe here — the service serves **only public legal texts** (no data, no database, no LLM calls).
 
@@ -94,7 +94,7 @@ gcloud run deploy legal-cite \
   --source=. \
   --region=europe-west4 \
   --allow-unauthenticated \
-  --memory=512Mi --cpu=1 --max-instances=2 --port=8080
+  --memory=512Mi --cpu=1 --max-instances=1 --timeout=300 --port=8080
 ```
 Publiczny bez auth jest tu bezpieczny — serwis serwuje **wyłącznie publiczne teksty aktów** (zero danych, zero bazy, zero wywołań LLM).
 

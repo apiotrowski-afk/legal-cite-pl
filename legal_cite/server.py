@@ -62,6 +62,12 @@ def main() -> None:
         # localhost) — publiczny serwis z publicznymi przepisami jej nie potrzebuje.
         mcp.settings.transport_security = TransportSecuritySettings(
             enable_dns_rebinding_protection=False)
+        # Bez sesji: Cloud Run potrafi dostawić drugą instancję w trakcie długiego
+        # żądania (konwersja PDF k.p.c. trwa ponad minutę), a sesja streamable-http
+        # żyje w pamięci jednej instancji — kolejne żądania trafiały „obok” niej
+        # (404 „Session terminated”). Narzędzia są bezstanowe, więc sesja nie jest
+        # do niczego potrzebna.
+        mcp.settings.stateless_http = True
         logger.info("legal-cite start: streamable-http na %s:%s (/mcp)",
                     mcp.settings.host, mcp.settings.port)
         mcp.run(transport="streamable-http")
