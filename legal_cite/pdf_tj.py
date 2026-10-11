@@ -151,9 +151,12 @@ def _tokeny_pdftotext(raw: str) -> list[str]:
 class Jednostka:
     num: str                 # numer w zapisie źródła: „18³ᵈ”, „36a”
     klucz: str               # zapis kanoniczny jak w data-id HTML: „18_3d”, „36a”
-    tekst: str               # pełny tekst artykułu z etykietami jednostek (ze znacznikami OPC)
+    tekst: str               # tekst artykułu: tylko obowiązujące brzmienia podjednostek (ze znacznikami OPC)
     odnosniki: list[str]     # numery przypisów przy tej jednostce
     data: _dt.date | None    # od kiedy obowiązuje to brzmienie (z odnośnika), gdy znana
+    pelny: str = ""          # tekst ze WSZYSTKIMI wydrukowanymi brzmieniami — do kontroli wierności
+    uwagi: list = dataclasses.field(default_factory=list)  # wybór brzmień podjednostek
+    niejednoznaczne: bool = False  # kilka brzmień podjednostki bez czytelnej daty
 
     def czysty(self) -> str:
         """Tekst do pokazania: bez znaczników opcjonalności."""
@@ -186,14 +189,63 @@ _NAGLOWEK_RE = re.compile(
     r"|(?:Dział|Rozdział|Oddział|Tytuł|Księga|Część)\s+(?:[IVXLC]+|\d+[a-z]?)\b\.?\s*$)")
 
 
-def _tekst_wezla(node: dict, odn: list[str], stop: list[bool]) -> str:
+_PODJEDNOSTKI = {"par": "§", "ust": "ust.", "pkt": "pkt", "lit": "lit."}
+
+
+def _wybierz_dzieci(dzieci: list[dict], wyb: dict) -> list[dict]:
+    """Zostawia obowiązujące brzmienie podjednostki drukowanej kilka razy.
+
+    Tekst jednolity drukuje czasem dwa brzmienia tego samego paragrafu albo
+    ustępu: dotychczasowe (odnośnik „obowiązuje do wejścia w życie zmiany…”) i
+    nowe („wejdzie w życie z dniem…”). Art. 131¹ᵃ § 1 k.p.c. w t.j. 2026: do
+    31.05.2026 i od 1.06.2026. Rozstrzyga data z odnośnika przy jednostce."""
+    from legal_cite.core import _data_wejscia, _wybierz_brzmienie
+
+    # brzmienia tej samej jednostki stoją bezpośrednio po sobie
+    grupy: list[tuple[tuple, list[int]]] = []
+    for i, ch in enumerate(dzieci):
+        if ch.get("type") not in _PODJEDNOSTKI:
+            continue
+        k = (ch["type"], str(ch.get("num")))
+        if grupy and grupy[-1][0] == k and grupy[-1][1][-1] == i - 1:
+            grupy[-1][1].append(i)
+        else:
+            grupy.append((k, [i]))
+    pomin: set[int] = set()
+    for (typ, num), idx in grupy:
+        if len(idx) < 2:
+            continue
+        daty = []
+        for i in idx:
+            m = _PRZYPIS_RE.search(dzieci[i].get("text") or "")
+            daty.append(_data_wejscia(wyb["przypisy"], m.group(1).split("_")[0]) if m else None)
+        wybor, nieznane = _wybierz_brzmienie(daty, wyb["dzis"])
+        opis = f"{_PODJEDNOSTKI[typ]} {num}"
+        if nieznane:
+            wyb["niejednoznaczne"] = True
+            wyb["uwagi"].append(f"{opis}: {len(idx)} brzmienia bez czytelnej daty wejścia w życie")
+            continue
+        pomin.update(i for j, i in enumerate(idx) if j != wybor)
+        d = daty[wybor]
+        wyb["uwagi"].append(
+            f"⚠ Tekst jednolity drukuje {len(idx)} brzmienia {opis}. "
+            + (f"Powyżej brzmienie obowiązujące od {d:%d.%m.%Y}." if d else
+               "Powyżej brzmienie obowiązujące w dniu tego tekstu jednolitego.")
+            + "".join(f" Kolejne wchodzi w życie {x:%d.%m.%Y}." for x in daty if x and x > wyb["dzis"]))
+    return [ch for i, ch in enumerate(dzieci) if i not in pomin]
+
+
+def _tekst_wezla(node: dict, odn: list[str], stop: list[bool], wyb: dict | None = None) -> str:
     typ = node.get("type")
     czesci = []
     if typ in _ETYKIETY:
         czesci.append(_ETYKIETY[typ].format(n=node.get("num", "")))
     if node.get("text"):
         czesci.append(node["text"])
-    for ch in node.get("children") or []:
+    dzieci = node.get("children") or []
+    if wyb is not None:
+        dzieci = _wybierz_dzieci(dzieci, wyb)
+    for ch in dzieci:
         if stop[0]:
             break
         if ch.get("type") in ("heading", "signature", "note"):
@@ -202,7 +254,7 @@ def _tekst_wezla(node: dict, odn: list[str], stop: list[bool]) -> str:
         if ch.get("type") == "text" and _NAGLOWEK_RE.match(_PRZYPIS_RE.sub("", ch.get("text") or "")):
             stop[0] = True
             break
-        czesci.append(_tekst_wezla(ch, odn, stop))
+        czesci.append(_tekst_wezla(ch, odn, stop, wyb))
     s = " ".join(c for c in czesci if c)
     odn.extend(_PRZYPIS_RE.findall(s))
     s = _PRZYPIS_RE.sub("", s)
@@ -237,9 +289,13 @@ def jednostki_md(md: str, przypisy: dict[str, str]) -> tuple[list[Jednostka], bo
             monotonicznie = False
         poprzedni = baza
         odn: list[str] = []
-        tekst = _tekst_wezla(node, odn, [False])
+        pelny = _tekst_wezla(node, odn, [False])
+        wyb = {"przypisy": przypisy, "dzis": _dt.date.today(), "uwagi": [],
+               "niejednoznaczne": False}
+        tekst = _tekst_wezla(node, [], [False], wyb)
         data = _data_wejscia(przypisy, odn[0]) if odn else None
-        out.append(Jednostka(num, klucz, tekst, odn, data))
+        out.append(Jednostka(num, klucz, tekst, odn, data, pelny=pelny,
+                             uwagi=wyb["uwagi"], niejednoznaczne=wyb["niejednoznaczne"]))
     return out, monotonicznie
 
 
@@ -316,7 +372,9 @@ def _dopasuj(md_tok: list[str], raw_tok: list[str], start: int,
 
 def wiernosc_pdftotext(jedn: Jednostka, raw_tok: list[str], dozwolone: set[str],
                        max_przerwa: int = _MAX_PRZERWA) -> WynikWiernosci:
-    md_tok = tokeny(jedn.tekst, opcjonalne=True)
+    # pełny tekst ze wszystkimi wydrukowanymi brzmieniami: wybór brzmienia nie
+    # może wyglądać jak utrata słów
+    md_tok = tokeny(jedn.pelny or jedn.tekst, opcjonalne=True)
     if len(md_tok) < 2:
         return WynikWiernosci(False, "pusty odczyt artykułu")
     # kandydaci na początek: wystąpienia „Art. N” w warstwie (także z numerem

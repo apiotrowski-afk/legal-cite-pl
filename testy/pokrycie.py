@@ -14,6 +14,8 @@ właściwy przedmiot oceny, bo tekst jednolity zamraża stan prawny na dzień
 obwieszczenia, a nowelizacja mogła wejść w życie później.
 
 Stan na 2026-10-04: 5801 OK, 0 odmów, 0 błędnych brzmień.
+Stan na 2026-10-11 (14 aktów, z k.r.o. i u.k.s.c.): wybór brzmienia
+podjednostek (§/ust./pkt drukowane dwa razy) uznawany za wzorzec.
 """
 import asyncio, collections, json, pathlib, re, sys
 
@@ -75,7 +77,13 @@ async def main():
         raw = RAW['last']
         key = core._klucz_pl(info)
         w, bledy = collections.Counter(), []
+        # brzmienie wybrane przez narzędzie (obowiązujące wersje podjednostek)
+        # też jest poprawnym wzorcem — surowy druk zawiera wszystkie wersje
+        wybrane_po_num = {}
+        for n, t, _ in core._jednostki_html(key, raw):
+            wybrane_po_num.setdefault(n, []).append(t)
         for num, brzmienia in jednostki(raw).items():
+            brzmienia = brzmienia + wybrane_po_num.get(num, [])
             art = cytat(num)
             if not art:
                 w['pominiete'] += 1

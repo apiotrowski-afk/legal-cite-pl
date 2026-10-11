@@ -28,7 +28,8 @@ Measured on 2026-10-10 (8 acts whose newest consolidated text is PDF-only, 4676 
 
 ### Tools
 - `verify_article("art. 45 u.k.k.")` — the wording of a provision. Format: `art. N [ust. M] CODE`.
-  Handles letter suffixes (`art. 36a`), `§` as a unit (`art. 58 § 2 KC`), superscripts (`art. 385¹` / `385[1]`).
+  Handles letter suffixes (`art. 36a`), `§` as a unit (`art. 58 § 2 KC`), superscripts with letters (`art. 385¹` / `385[1]` / `131¹ᵃ` / `131[1a]`), dotted codes (`k.p.c.`).
+  When a consolidated text prints **two wordings of the same paragraph/point** (current one and one entering into force later), the tool returns only the one in force today, chosen by the date in the footnote, and says so; if the date cannot be read, it refuses.
 - `list_acts()` — list of supported act codes (PL + EU).
 
 ### Run locally (stdio — Claude Desktop / Claude Code)
@@ -62,7 +63,8 @@ Add an entry to `PL_ACTS` (key = abbreviation; `pub`/`year`/`pos` from the Journ
 
 ### Narzędzia
 - `verify_article("art. 45 u.k.k.")` — brzmienie przepisu. Format: `art. N [ust. M] KOD`.
-  Obsługuje sufiks literowy (`art. 36a`), § jako jednostkę (`art. 58 § 2 KC`), indeks górny (`art. 385¹` / `385[1]` / `18[3d]`).
+  Obsługuje sufiks literowy (`art. 36a`), § jako jednostkę (`art. 58 § 2 KC`), indeks górny z literą (`art. 385¹` / `385[1]` / `131¹ᵃ` / `131[1a]`), kody z kropkami (`k.p.c.`, `k.r.o.`).
+  Gdy tekst jednolity drukuje **dwa brzmienia tego samego paragrafu, ustępu lub punktu** (obowiązujące i wchodzące w życie później), narzędzie zwraca tylko obowiązujące dziś — wybrane po dacie z odnośnika — i to zaznacza; gdy daty nie da się odczytać, odmawia.
 
 ### Teksty jednolite dostępne tylko w PDF (od 2025 r.)
 

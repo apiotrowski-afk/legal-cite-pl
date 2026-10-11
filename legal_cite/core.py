@@ -33,6 +33,10 @@ PL_ACTS: dict[str, dict] = {
     # sprawy kredytu konsumenckiego / SKD: art. 45 sankcja kredytu darmowego, art. 30 obowiązki
     "u.k.k.":   dict(pub="DU", year=2011, pos=715,  name="Ustawa o kredycie konsumenckim"),
     "UKK":      dict(pub="DU", year=2011, pos=715,  name="Ustawa o kredycie konsumenckim"),
+    "KRO":      dict(pub="DU", year=1964, pos=59,   name="Kodeks rodzinny i opiekuńczy"),
+    "KRiO":     dict(pub="DU", year=1964, pos=59,   name="Kodeks rodzinny i opiekuńczy"),
+    "u.k.s.c.": dict(pub="DU", year=2005, pos=1398, name="Ustawa o kosztach sądowych w sprawach cywilnych"),
+    "UKSC":     dict(pub="DU", year=2005, pos=1398, name="Ustawa o kosztach sądowych w sprawach cywilnych"),
 }
 
 # --- Akty UE → EUR-Lex (tekst polski), klucz = CELEX ---
@@ -77,10 +81,28 @@ def _resolve(act: str, table: dict) -> str | None:
         return act
     norm = act.lower().rstrip('.')
     idx = {k.lower().rstrip('.'): k for k in table}
-    return idx.get(norm)
+    if norm in idx:
+        return idx[norm]
+    # kropki i odstępy wewnątrz skrótu: k.p.c. / k. p. c. → KPC, u.k.s.c → UKSC
+    zwarty = re.sub(r'[.\s]', '', act.lower())
+    idx2 = {re.sub(r'[.\s]', '', k.lower()): k for k in table}
+    return idx2.get(zwarty)
 
 
 _SUP = str.maketrans("¹²³⁴⁵⁶⁷⁸⁹⁰", "1234567890")
+
+
+# litery modyfikujące Unicode używane w indeksach numerów (131¹ᵃ, 479³⁰ᶠ)
+_SUP_LIT = "ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ"
+_SUP_ALL = "¹²³⁴⁵⁶⁷⁸⁹⁰" + _SUP_LIT
+
+
+def _indeks_na_nawias(raw: str) -> str:
+    """„131¹ᵃ” → „131[1a]”: indeks górny (cyfry i litery) na zapis nawiasowy,
+    który rozumie reszta parsera."""
+    import unicodedata
+    return re.sub(rf'([{_SUP_ALL}]+)',
+                  lambda m: '[' + unicodedata.normalize('NFKC', m.group(1)) + ']', raw)
 
 
 def parse_citation(raw: str) -> dict | None:
@@ -92,7 +114,7 @@ def parse_citation(raw: str) -> dict | None:
         r'(\d+[a-z]?(?:\s*(?:[¹²³⁴⁵⁶⁷⁸⁹]+|\[\d+[a-z]?\]|\(\d+[a-z]?\)|\^\d+))?)\s*'  # numer art. + opc. indeks (385¹, 18[3d])
         r'(?:(?:ust\.|§)\s*(\d+\w?))?\s*'                                 # ustęp ALBO paragraf
         r'(?:(?:pkt|lit\.)\s*\S+\s*)?(.+)',                               # pkt/lit ignorowane; kod aktu
-        raw.strip(), re.IGNORECASE,
+        _indeks_na_nawias(raw.strip()), re.IGNORECASE,
     )
     if not m:
         return None
@@ -477,22 +499,113 @@ def _kanon_art(raw_art: str) -> str | None:
     return s if re.fullmatch(r'\d+[a-ząćęłńóśźż]*(?:_\d+[a-ząćęłńóśźż]?)*', s) else None
 
 
+_SUB_RE = re.compile(r'<div class="unit unit_(?:para|pint|lett|tire|ustp)[^"]*" id="[^"]*" data-id="([^"]+)"')
+# (klucz aktu, numer artykułu, które wystąpienie) → uwagi o wyborze brzmienia
+# podjednostek; wartość NIEJEDNOZNACZNE = nie da się ustalić, które obowiązuje
+_uwagi_jedn: dict[tuple, list[str]] = {}
+NIEJEDNOZNACZNE = "NIEJEDNOZNACZNE"
+
+
+def _opis_jednostki(data_id: str) -> str:
+    """para_1_1 → „§ 1¹ / ust. 1¹”, pint_4 → „pkt 4”, lett_a → „lit. a”."""
+    typ, _, nr = data_id.partition("_")
+    nr = nr.replace("_", "")
+    return {"para": f"§/ust. {nr}", "pint": f"pkt {nr}", "lett": f"lit. {nr}",
+            "tire": "tiret", "ustp": f"ust. {nr}"}.get(typ, data_id)
+
+
+def _dzieci(html: str, start: int, end: int) -> list[tuple[str, int, int]]:
+    """Podjednostki leżące bezpośrednio w html[start:end] (bez zagnieżdżonych)."""
+    out, koniec = [], start
+    for m in _SUB_RE.finditer(html, start, end):
+        if m.start() < koniec:
+            continue
+        k = min(_koniec_div(html, m.start()), end)
+        out.append((m.group(1), m.start(), k))
+        koniec = k
+    return out
+
+
+def _wybierz_podjednostki_html(html: str, mapa: dict[str, str], dzis: _dt.date,
+                               uwagi: list[str]) -> str:
+    """Usuwa z fragmentu artykułu nieobowiązujące brzmienia podjednostek.
+
+    Tekst jednolity drukuje czasem DWA brzmienia tego samego paragrafu, ustępu
+    lub punktu: dotychczasowe („obowiązuje do wejścia w życie zmiany…”) i nowe
+    („wejdzie w życie z dniem…”). Art. 131¹ᵃ § 1 k.p.c. w t.j. 2026: brzmienie
+    do 31.05.2026 i od 1.06.2026. Rozstrzyga data z odnośnika, jak na poziomie
+    artykułu. Gdy daty nie da się odczytać — uwaga NIEJEDNOZNACZNE (odmowa).
+    """
+    wytnij: list[tuple[int, int]] = []
+
+    def rekur(a: int, b: int) -> None:
+        dzieci = _dzieci(html, a, b)
+        # brzmienia tej samej jednostki stoją bezpośrednio po sobie; ten sam
+        # numer dalej (pkt 1 w ust. 1 i pkt 1 w ust. 3, gdy źródło nie zagnieżdża
+        # punktów w ustępach) to inna jednostka
+        grupy: list[tuple[str, list[int]]] = []
+        for i, (did, _, _) in enumerate(dzieci):
+            if grupy and grupy[-1][0] == did:
+                grupy[-1][1].append(i)
+            else:
+                grupy.append((did, [i]))
+        for did, idx in grupy:
+            if len(idx) < 2:
+                continue
+            daty = []
+            for i in idx:
+                _, x, y = dzieci[i]
+                odn = _PIERWSZY_ODNOSNIK_RE.search(html, x, y)
+                daty.append(_data_wejscia(mapa, odn.group(1)) if odn else None)
+            wybor, nieznane = _wybierz_brzmienie(daty, dzis)
+            if nieznane:
+                uwagi.append(NIEJEDNOZNACZNE)
+                uwagi.append(f"{_opis_jednostki(did)}: {len(idx)} brzmienia bez czytelnej daty")
+                continue
+            for j, i in enumerate(idx):
+                if j != wybor:
+                    wytnij.append(dzieci[i][1:])
+            d = daty[wybor]
+            uwagi.append(f"⚠ Tekst jednolity drukuje {len(idx)} brzmienia {_opis_jednostki(did)}. "
+                         + (f"Powyżej brzmienie obowiązujące od {d:%d.%m.%Y}." if d else
+                            "Powyżej brzmienie obowiązujące w dniu tego tekstu jednolitego.")
+                         + "".join(f" Kolejne wchodzi w życie {x:%d.%m.%Y}." for x in daty
+                                   if x and x > dzis))
+        for did, x, y in dzieci:
+            if (x, y) not in wytnij:
+                rekur(html.index(">", x) + 1, y)
+
+    rekur(0, len(html))
+    for x, y in sorted(wytnij, reverse=True):
+        html = html[:x] + html[y:]
+    return html
+
+
 def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | None]]:
     """Artykuły właściwego aktu wg znaczników źródła, w kolejności dokumentu.
 
     Pomija przepisy przejściowe ustaw nowelizujących — źródło oznacza je
     prefiksem `pass_` w atrybucie id, więc nie trzeba ich zgadywać z numeracji.
+    W treści artykułu zostaje tylko obowiązujące brzmienie każdej podjednostki
+    (uwagi o wyborze w _uwagi_jedn).
     """
     if key in _jedn_cache:
         return _jedn_cache[key]
     mapa = _odnosniki(key, raw_html)
+    dzis = _dt.date.today()
     out = []
     for m in _UNIT_RE.finditer(raw_html):
         if 'pass_' in m.group(1):
             continue
         fragment = raw_html[m.start():_koniec_div(raw_html, m.start())]
         odn = _PIERWSZY_ODNOSNIK_RE.search(fragment)
-        out.append((m.group(2).lower(), _strip_html(fragment),
+        uwagi: list[str] = []
+        fragment = _wybierz_podjednostki_html(fragment, mapa, dzis, uwagi)
+        num = m.group(2).lower()
+        if uwagi:
+            ktore = sum(1 for n, *_ in out if n == num)
+            _uwagi_jedn[(key, num, ktore)] = uwagi
+        out.append((num, _strip_html(fragment),
                     _data_wejscia(mapa, odn.group(1)) if odn else None))
     out = _napraw_zlepki(key, out)
     _jedn_cache[key] = out
@@ -522,6 +635,11 @@ def _napraw_zlepki(key: str, jedn: list[tuple]) -> list[tuple]:
                 jedn[i] = (cyfry[:k],) + jedn[i][1:]
                 break
     return jedn
+
+
+class Niejednoznaczne(Exception):
+    """Tekst jednolity drukuje kilka brzmień jednostki, a z odnośników nie da
+    się ustalić, które obowiązuje — narzędzie odmawia zamiast zgadywać."""
 
 
 def extract_pl_article_html(key: str, raw_html: str, art: str,
@@ -557,6 +675,9 @@ def extract_pl_article_html(key: str, raw_html: str, art: str,
             elif data <= dzis:
                 wybor = i
     tekst, data_wyboru = trafienia[wybor]
+    uwagi_pod = _uwagi_jedn.get((key, klucz, wybor), [])
+    if NIEJEDNOZNACZNE in uwagi_pod:
+        raise Niejednoznaczne("; ".join(u for u in uwagi_pod if u != NIEJEDNOZNACZNE))
     if not _wiarygodny(tekst):
         return None
     if ustep:
@@ -564,6 +685,8 @@ def extract_pl_article_html(key: str, raw_html: str, art: str,
         if not tekst:
             return None
 
+    for u in uwagi_pod:
+        tekst += "\n\n" + u
     zlepek = _zlepki.get((key, klucz))
     if zlepek:
         tekst += (f"\n\n⚠ Źródło drukuje numer tego artykułu zlepiony z numerem "
@@ -710,8 +833,16 @@ async def _odpowiedz_pl(info: dict, art: str, ustep: str | None, ref: str) -> st
             return f"❌ Nie udało się pobrać {info['name']} (sieć/ELI)"
         key = _klucz_pl(info)
         raw = _html_cache.get(key)
-        result = extract_pl_article_html(key, raw, art, ustep) if raw else None
-        if result is None:
+        try:
+            result = extract_pl_article_html(key, raw, art, ustep) if raw else None
+        except Niejednoznaczne as e:
+            return (f"❌ {ref} {info['name']}: tekst jednolity drukuje kilka brzmień tej "
+                    f"jednostki i z odnośników nie da się ustalić, które obowiązuje ({e}). "
+                    f"Sprawdź w Dz.U.: https://api.sejm.gov.pl/eli/acts/{najnowszy['id']}/text.pdf")
+        if result is None and not (raw and _kanon_art(art) and any(
+                n == _kanon_art(art) for n, *_ in _jednostki_html(key, raw))):
+            # ścieżka zapasowa (regex po tekście) tylko, gdy struktura źródła nie zna
+            # artykułu; inaczej oddałaby wszystkie wydrukowane brzmienia naraz
             result = extract_pl_article(text, art, ustep)
         if not result:
             return f"❌ {ref} nie znaleziony w {info['name']}. Sprawdź numer artykułu."
@@ -788,6 +919,11 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
     dzis = _dt.date.today()
     wybor, nieznane = _wybierz_brzmienie([j.data for j in trafienia], dzis)
     jedn = trafienia[wybor]
+    if jedn.niejednoznaczne:
+        return _odmowa_pdf(info, ref, ident, adres, url_pdf,
+                           "tekst jednolity drukuje kilka brzmień jednostki i z odnośników nie da "
+                           "się ustalić, które obowiązuje (" + "; ".join(jedn.uwagi) + ")",
+                           starszy_id)
 
     # kontrola 1: starszy urzędowy HTML
     rel = pdf_tj.porownaj_z_html(jedn, html_teksty)
@@ -864,7 +1000,7 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
                       f"({od.data_tj}) nie weszła w życie żadna nowelizacja")
         akt_kod = "potwierdzona_wg_wykazu_eli"
 
-    uwagi = ""
+    uwagi = "".join("\n\n" + u for u in jedn.uwagi)
     if len(trafienia) > 1:
         uwagi += f"\n\n⚠ Tekst jednolity drukuje {len(trafienia)} brzmienia tego artykułu. "
         uwagi += (f"Powyżej brzmienie obowiązujące od {jedn.data:%d.%m.%Y}."

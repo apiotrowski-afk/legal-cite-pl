@@ -15,6 +15,8 @@ starszym HTML, więc narzędzie i tak oddaje tekst urzędowy); względem HTML:
 identycznych 4340, różnych z odnośnikiem 119, różnych bez odnośnika 62
 (nowelizacje między tekstami jednolitymi), nowych 155. Numery artykułów
 monotoniczne we wszystkich 8 aktach.
+Stan na 2026-10-11 (10 aktów, z k.r.o. i u.k.s.c.; 5390 artykułów): pdftotext
+zaliczona 5388; wybór brzmienia podjednostek w 12 artykułach, 0 niejednoznacznych.
 """
 import asyncio, collections, pathlib, sys, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -63,5 +65,5 @@ async def main(kody):
     print()
 
 
-kody = sys.argv[1:] or ["KP", "KC", "KPC", "KK", "PrAut", "u.z.n.k.", "u.p.k.", "u.k.k."]
+kody = sys.argv[1:] or ["KP", "KC", "KPC", "KK", "PrAut", "u.z.n.k.", "u.p.k.", "u.k.k.", "KRO", "u.k.s.c."]
 asyncio.run(main(kody))

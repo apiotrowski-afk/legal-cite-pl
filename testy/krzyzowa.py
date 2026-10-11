@@ -11,6 +11,10 @@ Stan na 2026-10-03: 5803 zgodne, 3 rozbieżności i wszystkie zamierzone —
 art. 15 k.p.c. (źródło zlepia numer z odnośnikiem, znajduje tylko struktura)
 oraz art. 3b u.ś.u.d.e. dwukrotnie (dwa brzmienia; struktura bierze
 obowiązujące, ścieżka tekstowa brała dłuższe, czyli przyszłe).
+
+Od 2026-10-11 dochodzi wybór brzmienia PODJEDNOSTEK: art. 479⁶¹ k.p.c. ma § 1
+w dwóch brzmieniach (do i od 10.11.2024); struktura bierze obowiązujące, ścieżka
+tekstowa drukuje oba — rozbieżność zamierzona.
 """
 import asyncio, pathlib, re, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
