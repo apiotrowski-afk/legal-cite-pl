@@ -17,6 +17,11 @@ identycznych 4340, różnych z odnośnikiem 119, różnych bez odnośnika 62
 monotoniczne we wszystkich 8 aktach.
 Stan na 2026-10-11 (10 aktów, z k.r.o. i u.k.s.c.; 5390 artykułów): pdftotext
 zaliczona 5388; wybór brzmienia podjednostek w 12 artykułach, 0 niejednoznacznych.
+Stan na 2026-10-13 (eli2md 0.6.54, pdftotext 24.02; 10 aktów, 5124 artykuły —
+o 30 więcej, bo doszły numery z dwiema literami: 59aa, 43ba, 7aa): pdftotext
+zaliczona 5124/5124 (8 aktów z 10.10: 4706/4706). Pominięte słowa warstwy
+tłumaczy już tylko nagłówek strony albo cały przypis w tym miejscu, a nie
+samo wystąpienie słowa w którymś przypisie aktu.
 """
 import asyncio, collections, pathlib, sys, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -46,7 +51,7 @@ async def main(kody):
         w = collections.Counter()
         bledy = []
         for j in od.jednostki:
-            wyn = pdf_tj.wiernosc_pdftotext(j, od.raw_tok, od.dozwolone)
+            wyn = pdf_tj.wiernosc_pdftotext(j, od.raw_tok, od.wyjasnienia)
             if not wyn.ok:
                 w["pdftotext_ZLE"] += 1
                 bledy.append((j.num, wyn.powod[:110]))

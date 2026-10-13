@@ -13,7 +13,8 @@ Kontrole wierności odczytu (czy konwersja oddaje dokument):
   2. warstwa tekstowa PDF — tekst artykułu musi być uporządkowanym podciągiem
      słów odczytanych z tego samego PDF drugim, niezależnym czytnikiem
      (poppler/pdftotext; eli2md czyta przez pdfminer), a słowa pominięte przez
-     konwerter w obrębie artykułu mogą być tylko nagłówkami stron i przypisami;
+     konwerter w obrębie artykułu muszą w tym miejscu tworzyć nagłówek strony
+     albo cały przypis;
   3. starszy tekst jednolity w HTML — źródło urzędowe i niezależne od PDF:
      artykuł identyczny potwierdza odczyt; różny musi mieć wytłumaczenie
      (odnośnik przy jednostce albo nowelizacja między datami obu tekstów).
@@ -24,6 +25,7 @@ jednolity może już wymagać uwzględnienia nowelizacji ogłoszonych po nim.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import dataclasses
 import datetime as _dt
 import hashlib
@@ -57,8 +59,6 @@ _MAX_PRZERWA = 1500
 # Słowa warstwy tekstowej pominięte przez konwerter w obrębie artykułu, których
 # nie tłumaczą nagłówki stron, przypisy ani numery odnośników.
 _MAX_NIEWYJASNIONE = 0
-
-_STOPKA = {"dziennik", "ustaw", "poz", "s", "kancelaria", "sejmu"}
 
 
 def wersja_konwertera() -> str:
@@ -157,6 +157,7 @@ class Jednostka:
     pelny: str = ""          # tekst ze WSZYSTKIMI wydrukowanymi brzmieniami — do kontroli wierności
     uwagi: list = dataclasses.field(default_factory=list)  # wybór brzmień podjednostek
     niejednoznaczne: bool = False  # kilka brzmień podjednostki bez czytelnej daty
+    wlasny_odnosnik: str | None = None  # odnośnik przy samym oznaczeniu artykułu
 
     def czysty(self) -> str:
         """Tekst do pokazania: bez znaczników opcjonalności."""
@@ -164,8 +165,9 @@ class Jednostka:
 
 
 def kanon_md(num: str) -> str | None:
-    """„18³ᵈ” → „18_3d”, „5[1q]” → „5_1q”, „36a” → „36a”, „22” → „22”."""
-    m = re.match(r"^(\d+)([a-ząćęłńóśźż]?)(.*)$", num.strip())
+    """„18³ᵈ” → „18_3d”, „5[1q]” → „5_1q”, „36a” → „36a”, „59aa” → „59aa”,
+    „22” → „22”."""
+    m = re.match(r"^(\d+)([a-ząćęłńóśźż]*)(.*)$", num.strip())
     if not m:
         return None
     reszta = m.group(3).replace("[", "").replace("]", "").strip(". ")
@@ -190,6 +192,15 @@ _NAGLOWEK_RE = re.compile(
 
 
 _PODJEDNOSTKI = {"par": "§", "ust": "ust.", "pkt": "pkt", "lit": "lit."}
+_WLASNY_RE = re.compile(r"\s*(?:\(\s*\w+(?:\s+\w+)?\s*\)\s*)?\[\^([^\]\s]+)\]")
+
+
+def _wlasny_odnosnik(node: dict) -> str | None:
+    """Numer odnośnika stojącego przy samym oznaczeniu jednostki („2c)[^27]
+    przeciwdziałać…”, „(uchylony)[^68]”) — a nie gdziekolwiek w jej treści ani
+    w podjednostkach."""
+    m = _WLASNY_RE.match(node.get("text") or "")
+    return m.group(1).split("_")[0] if m else None
 
 
 def _wybierz_dzieci(dzieci: list[dict], wyb: dict) -> list[dict]:
@@ -198,8 +209,12 @@ def _wybierz_dzieci(dzieci: list[dict], wyb: dict) -> list[dict]:
     Tekst jednolity drukuje czasem dwa brzmienia tego samego paragrafu albo
     ustępu: dotychczasowe (odnośnik „obowiązuje do wejścia w życie zmiany…”) i
     nowe („wejdzie w życie z dniem…”). Art. 131¹ᵃ § 1 k.p.c. w t.j. 2026: do
-    31.05.2026 i od 1.06.2026. Rozstrzyga data z odnośnika przy jednostce."""
-    from legal_cite.core import _data_wejscia, _wybierz_brzmienie
+    31.05.2026 i od 1.06.2026. Rozstrzyga data z odnośnika przy jednostce.
+
+    Pomija też podjednostkę wydrukowaną raz, ale dodaną nowelizacją, która
+    jeszcze nie weszła w życie (art. 94 pkt 2c k.p. w t.j. 2026: od 5.11.2026)."""
+    from legal_cite.core import (_data_wejscia, _jeszcze_nie, _uwaga_pominieta,
+                                 _wybierz_brzmienie)
 
     # brzmienia tej samej jednostki stoją bezpośrednio po sobie
     grupy: list[tuple[tuple, list[int]]] = []
@@ -214,6 +229,14 @@ def _wybierz_dzieci(dzieci: list[dict], wyb: dict) -> list[dict]:
     pomin: set[int] = set()
     for (typ, num), idx in grupy:
         if len(idx) < 2:
+            stan = _jeszcze_nie(wyb["przypisy"], _wlasny_odnosnik(dzieci[idx[0]]), wyb["dzis"])
+            if stan and stan[1]:
+                pomin.add(idx[0])
+                wyb["uwagi"].append(_uwaga_pominieta(f"{_PODJEDNOSTKI[typ]} {num}", stan[0]))
+            elif stan:
+                wyb["niejednoznaczne"] = True
+                wyb["uwagi"].append(f"{_PODJEDNOSTKI[typ]} {num}: jedyne wydrukowane brzmienie "
+                                    f"obowiązuje dopiero od {stan[0]:%d.%m.%Y}")
             continue
         daty = []
         for i in idx:
@@ -262,10 +285,12 @@ def _tekst_wezla(node: dict, odn: list[str], stop: list[bool], wyb: dict | None 
     return re.sub(r"\s+", " ", s).strip()
 
 
-def jednostki_md(md: str, przypisy: dict[str, str]) -> tuple[list[Jednostka], bool]:
+def jednostki_md(md: str, przypisy: dict[str, str],
+                 dzis: _dt.date | None = None) -> tuple[list[Jednostka], bool]:
     """Artykuły z drzewa eli2md w kolejności dokumentu oraz flaga, czy ich
     numery rosną monotonicznie (drugie brzmienie tego samego artykułu jest
-    dozwolone — stoi obok pierwszego)."""
+    dozwolone — stoi obok pierwszego). dzis — dzień, na który wybierane są
+    obowiązujące brzmienia (domyślnie dzisiejszy)."""
     from eli2md.tree import md_to_tree
     from legal_cite.core import _data_wejscia
 
@@ -290,18 +315,30 @@ def jednostki_md(md: str, przypisy: dict[str, str]) -> tuple[list[Jednostka], bo
         poprzedni = baza
         odn: list[str] = []
         pelny = _tekst_wezla(node, odn, [False])
-        wyb = {"przypisy": przypisy, "dzis": _dt.date.today(), "uwagi": [],
+        wyb = {"przypisy": przypisy, "dzis": dzis or _dt.date.today(), "uwagi": [],
                "niejednoznaczne": False}
         tekst = _tekst_wezla(node, [], [False], wyb)
-        data = _data_wejscia(przypisy, odn[0]) if odn else None
+        # data brzmienia artykułu: z odnośnika przy jego oznaczeniu, a nie z
+        # pierwszego odnośnika w treści — ten bywa odnośnikiem paragrafu
+        # (art. 860 k.c.: „Dodany…” przy § 3 nie datuje całego artykułu)
+        wlasny = _wlasny_odnosnik(node)
+        data = _data_wejscia(przypisy, wlasny) if wlasny else None
         out.append(Jednostka(num, klucz, tekst, odn, data, pelny=pelny,
-                             uwagi=wyb["uwagi"], niejednoznaczne=wyb["niejednoznaczne"]))
+                             uwagi=wyb["uwagi"], niejednoznaczne=wyb["niejednoznaczne"],
+                             wlasny_odnosnik=wlasny))
     return out, monotonicznie
+
+
+# Definicja przypisu z kolejnymi akapitami: eli2md zapisuje je po pustym
+# wierszu z wcięciem 4 spacji (składnia przypisów Markdown) — przypis 1 u.p.k.
+# to lista wdrażanych dyrektyw, po jednej w akapicie.
+_PRZYPIS_DEF_RE = re.compile(
+    r"(?m)^\[\^([^\]\s]+)\]:\s*(.*(?:\n(?!\[\^|\n).*|\n(?:[ \t]*\n)+ {4}.*)*)")
 
 
 def przypisy_md(md: str) -> dict[str, str]:
     mapa: dict[str, str] = {}
-    for m in re.finditer(r"(?m)^\[\^([^\]\s]+)\]:\s*(.*(?:\n(?!\[\^|\n).*)*)", md):
+    for m in _PRZYPIS_DEF_RE.finditer(md):
         mapa.setdefault(m.group(1), re.sub(r"\s+", " ", m.group(2)).strip())
         # odesłania w przypisach używają numeru bez przyrostka strony
         mapa.setdefault(m.group(1).split("_")[0], mapa[m.group(1)])
@@ -317,13 +354,15 @@ class WynikWiernosci:
     niewyjasnione: list[str] = dataclasses.field(default_factory=list)
 
 
-def _dopasuj(md_tok: list[str], raw_tok: list[str], start: int,
-             max_przerwa: int) -> tuple[int, int, list[int]] | None:
+def _dopasuj(md_tok: list[str], raw_tok: list[str], start: int, max_przerwa: int,
+             pomin: bytearray | None = None) -> tuple[int, int, list[int]] | None:
     """Dopasowuje słowa artykułu jako uporządkowany podciąg warstwy tekstowej
     od pozycji start. Zwraca (pierwsza, za_ostatnią, pozycje_dopasowane) albo
     None. Toleruje wyraz złamany na końcu wiersza (dwa słowa warstwy = jedno
     słowo artykułu) i odwrotnie (słowo warstwy = dwa słowa artykułu). Słowo
-    opcjonalne (indeks górny) może w warstwie nie wystąpić."""
+    opcjonalne (indeks górny) może w warstwie nie wystąpić. Pozycje oznaczone
+    w pomin (nagłówki stron, przypisy) nie są treścią: słowo artykułu nie może
+    się do nich dopasować („w” z przypisu zamiast „W sprawach…” za nim)."""
     i, j = start, 0
     pozycje: list[int] = []
     pierwsza = -1
@@ -333,9 +372,19 @@ def _dopasuj(md_tok: list[str], raw_tok: list[str], start: int,
         opcjonalne = t.startswith(OPC)
         t = t.lstrip(OPC)
         nast = md_tok[j + 1].lstrip(OPC) if j + 1 < n_md else None
+        # warstwa gubi indeks („art. 6¹ ust. 1” → „art 6 ust 1”), a następne
+        # słowo odczytu stoi w niej od razu: indeks pomijamy, zamiast dopasować
+        # go do takiej samej cyfry o kilka słów dalej (tu: „1” z „ust. 1”)
+        if opcjonalne and nast is not None and i < n_raw and raw_tok[i] == nast and t != nast:
+            j += 1
+            continue
         k, limit = i, min(n_raw, i + (3 if opcjonalne else max_przerwa) + 1)
         trafiony = None
         while k < limit:
+            if pomin is not None and pomin[k]:
+                k += 1
+                limit = min(n_raw, limit + 1)
+                continue
             r = raw_tok[k]
             if r == t:
                 trafiony = (k + 1, 1)
@@ -370,8 +419,111 @@ def _dopasuj(md_tok: list[str], raw_tok: list[str], start: int,
     return pierwsza, i, pozycje
 
 
-def wiernosc_pdftotext(jedn: Jednostka, raw_tok: list[str], dozwolone: set[str],
+# Nagłówek strony „Dziennik Ustaw – 77 – Poz. 795” pdftotext wypisuje różnie:
+# numer strony bywa przed nim albo za nim, a „Poz. 795” dopiero po pierwszym
+# wierszu treści („Dziennik Ustaw – 77 – n – okres spłaty… Poz. 795”). Tyle
+# słów może dzielić „Dziennik Ustaw” od „Poz. N”.
+_MAX_ROZSUNIECIE = 80
+
+
+def _ciag_przypisu(raw_tok: list[str], q: int, cel: str, stop: bytearray) -> tuple[int, int]:
+    """Od pozycji q zbiera słowa warstwy, dopóki składają się na cel (słowa
+    przypisu zlepione w jeden napis; liczby pomijane po obu stronach, bo
+    pdftotext wypisuje numerację wyliczeń osobno od treści). Zwraca (pozycja
+    za ostatnim zebranym słowem, liczba dopasowanych znaków)."""
+    zebrane, n = 0, len(raw_tok)
+    while q < n and zebrane < len(cel) and not stop[q]:
+        t = raw_tok[q]
+        if not t.isdigit():
+            if not cel.startswith(t, zebrane):
+                break
+            zebrane += len(t)
+        q += 1
+    return q, zebrane
+
+
+def wyjasnienia_warstwy(raw_tok: list[str], przypisy: dict[str, str], pos: str) -> bytearray:
+    """Dla każdego słowa warstwy tekstowej: czy należy do nagłówka strony albo
+    do przypisu wydrukowanego u dołu strony (1), czy do treści (0).
+
+    Słowo warstwy pominięte w odczycie artykułu jest wytłumaczone tylko wtedy,
+    gdy stoi w takim miejscu — nie wystarcza, że to samo słowo występuje
+    w którymś przypisie aktu. Inaczej kontrola przepuszczała odczyt art. 80
+    k.k. bez słowa „kary”, bo „kary” jest w innym przypisie tego kodeksu.
+
+    Przypis to pełna treść któregoś przypisu aktu, słowo po słowie, w bloku
+    przypisów sięgającym końca strony (za nim kolejny przypis albo nagłówek
+    następnej strony; numery przypisów pdftotext wypisuje osobno, więc nie są
+    wymagane). Przypis przeniesiony na następną stronę: początek kończy się
+    nagłówkiem strony, a reszta stoi na następnej stronie w takim samym bloku
+    — bez tej reszty ostatnie słowa treści przed końcem strony („…wskazany w”)
+    uchodziłyby za początek przypisu „W brzmieniu…”."""
+    n = len(raw_tok)
+    maska = bytearray(n)
+    naglowki = bytearray(n)
+    poczatek_bloku = bytearray(n + 1)   # tu zaczyna się nagłówek strony albo przypis z bloku
+    poczatek_bloku[n] = 1
+    strony: list[int] = []              # pozycje nagłówków stron
+    for k in range(n - 3):
+        if raw_tok[k] == "dziennik" and raw_tok[k + 1] == "ustaw":
+            for q in range(k + 2, min(n - 1, k + 3 + _MAX_ROZSUNIECIE)):
+                if raw_tok[q] == "poz" and raw_tok[q + 1] == pos:
+                    for x in (k, k + 1, q, q + 1):
+                        maska[x] = naglowki[x] = 1
+                    if raw_tok[k + 2].isdigit() and k + 2 < q:   # numer strony
+                        maska[k + 2] = naglowki[k + 2] = 1
+                    poczatek_bloku[k] = 1
+                    strony.append(k)
+                    break
+    strony.append(n)
+
+    def za_liczbami(q: int) -> int:
+        while q < n and raw_tok[q].isdigit() and not naglowki[q]:
+            q += 1
+        return q
+
+    po_slowie: dict[str, list[str]] = {}   # pierwsze słowo przypisu → treści zlepione w napis
+    for tresc in przypisy.values():
+        slowa = [t for t in tokeny(tresc) if not t.isdigit()]
+        if slowa and "".join(slowa) not in po_slowie.setdefault(slowa[0], []):
+            po_slowie[slowa[0]].append("".join(slowa))
+
+    def reszta_na_stronie(naglowek: int, reszta: str) -> tuple[int, int] | None:
+        """Reszta przeniesionego przypisu na stronie zaczynającej się nagłówkiem
+        na pozycji naglowek: (początek, koniec) albo None."""
+        koniec = strony[bisect.bisect_right(strony, naglowek)]
+        for k in range(naglowek + 2, koniec):
+            if maska[k] or raw_tok[k].isdigit() or not reszta.startswith(raw_tok[k]):
+                continue
+            q, zebrane = _ciag_przypisu(raw_tok, k, reszta, naglowki)
+            if zebrane == len(reszta) and poczatek_bloku[za_liczbami(q)]:
+                return k, q
+        return None
+
+    for k in range(n - 1, -1, -1):             # od końca: blok buduje się od nagłówka w górę
+        if naglowki[k]:
+            continue
+        for cel in po_slowie.get(raw_tok[k], ()):
+            q, zebrane = _ciag_przypisu(raw_tok, k, cel, naglowki)
+            if zebrane == len(cel) and poczatek_bloku[za_liczbami(q)]:
+                maska[k:q] = b"\x01" * (q - k)
+                poczatek_bloku[k] = 1
+                break
+            if 0 < zebrane < len(cel) and q < n and poczatek_bloku[q] and naglowki[q]:
+                dalej = reszta_na_stronie(q, cel[zebrane:])
+                if dalej:
+                    maska[k:q] = b"\x01" * (q - k)
+                    maska[dalej[0]:dalej[1]] = b"\x01" * (dalej[1] - dalej[0])
+                    poczatek_bloku[k] = poczatek_bloku[dalej[0]] = 1
+                    break
+    return maska
+
+
+def wiernosc_pdftotext(jedn: Jednostka, raw_tok: list[str], wyjasnione: bytearray,
                        max_przerwa: int = _MAX_PRZERWA) -> WynikWiernosci:
+    """wyjasnione — wynik wyjasnienia_warstwy() dla tej samej warstwy."""
+    if len(wyjasnione) != len(raw_tok):
+        raise TypeError("wyjasnione: oczekiwano wyniku wyjasnienia_warstwy(raw_tok, …)")
     # pełny tekst ze wszystkimi wydrukowanymi brzmieniami: wybór brzmienia nie
     # może wyglądać jak utrata słów
     md_tok = tokeny(jedn.pelny or jedn.tekst, opcjonalne=True)
@@ -395,9 +547,9 @@ def wiernosc_pdftotext(jedn: Jednostka, raw_tok: list[str], dozwolone: set[str],
     glowa = md_tok[:n_glowy]
     najlepszy: WynikWiernosci | None = None
     for k in kandydaci:
-        if _dopasuj(glowa, raw_tok, k, max_przerwa=3) is None:
+        if _dopasuj(glowa, raw_tok, k, 3, wyjasnione) is None:
             continue
-        wynik = _dopasuj(md_tok, raw_tok, k, max_przerwa)
+        wynik = _dopasuj(md_tok, raw_tok, k, max_przerwa, wyjasnione)
         if wynik is None:
             najlepszy = najlepszy or WynikWiernosci(
                 False, "słowa odczytu nie układają się w kolejności warstwy tekstowej PDF")
@@ -408,7 +560,7 @@ def wiernosc_pdftotext(jedn: Jednostka, raw_tok: list[str], dozwolone: set[str],
         # niż treść, więc pominięte przy dopasowaniu nie świadczą o utracie tekstu
         etykiety = {t.lstrip(OPC) for t in md_tok if t.startswith(OPC)}
         niewyjasnione = [raw_tok[p] for p in range(pierwsza, za)
-                         if p not in uzyte and raw_tok[p] not in dozwolone
+                         if p not in uzyte and not wyjasnione[p]
                          and raw_tok[p] not in etykiety and not raw_tok[p].isdigit()]
         if len(niewyjasnione) <= _MAX_NIEWYJASNIONE:
             return WynikWiernosci(True)
@@ -437,7 +589,7 @@ class OdczytPDF:
     przypisy: dict[str, str]
     monotoniczne: bool
     raw_tok: list[str]
-    dozwolone: set[str]              # słowa przypisów i stopek, które warstwa ma, a odczyt nie
+    wyjasnienia: bytearray           # które słowa warstwy to nagłówki stron i przypisy
 
     def znajdz(self, klucz: str) -> list[Jednostka]:
         return [j for j in self.jednostki if j.klucz == klucz]
@@ -562,15 +714,13 @@ async def odczyt(ident: str, meta_tj: dict | None = None) -> OdczytPDF:
         przypisy = przypisy_md(md)
         jednostki, monotoniczne = jednostki_md(md, przypisy)
         raw_tok = _tokeny_pdftotext(raw) if raw else []
-        dozwolone = set(_STOPKA) | {pos}
-        for tresc in przypisy.values():
-            dozwolone.update(tokeny(tresc))
+        wyjasnienia = wyjasnienia_warstwy(raw_tok, przypisy, pos)
         wynik = OdczytPDF(ident=ident, url_pdf=url_pdf, sha256=sha,
                           data_tj=meta_tj.get("announcementDate") or "",
                           adres=meta_tj.get("displayAddress") or ident,
                           konwerter=wersja, pdftotext=wersja_pdftotext() if raw else None,
                           jednostki=jednostki, przypisy=przypisy, monotoniczne=monotoniczne,
-                          raw_tok=raw_tok, dozwolone=dozwolone)
+                          raw_tok=raw_tok, wyjasnienia=wyjasnienia)
         logger.info("odczyt pdf %s: artykulow=%d monotonicznie=%s pdftotext=%s",
                     ident, len(jednostki), monotoniczne, bool(raw))
         _odczyty[ident] = wynik

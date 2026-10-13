@@ -48,11 +48,12 @@ def jednostki(raw):
 
 
 def cytat(num):
-    """arti_385_1 → 'art. 385[1]', arti_3a → 'art. 3a', arti_15 → 'art. 15'."""
+    """arti_385_1 → 'art. 385[1]', arti_3a → 'art. 3a', arti_59aa → 'art. 59aa',
+    arti_15 → 'art. 15'."""
     if '_' in num:
         baza, idx = num.split('_', 1)
         return f'{baza}[{idx}]' if idx.isdigit() else None
-    return num if re.fullmatch(r'\d+[a-ząćęłńóśźż]?', num) else None
+    return num if re.fullmatch(r'\d+[a-ząćęłńóśźż]*', num) else None
 
 
 def norm(s):

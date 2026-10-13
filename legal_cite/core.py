@@ -107,11 +107,11 @@ def _indeks_na_nawias(raw: str) -> str:
 
 def parse_citation(raw: str) -> dict | None:
     """Parsuje cytat: 'art. N[a][¹] [ust./§ M] [pkt/lit. X] KOD' → {art, ustep, act}.
-    Obsługuje sufiks literowy (36a), indeks górny (385¹/385[1]/385(1)) i § jako
-    jednostkę redakcyjną (KC numeruje paragrafami)."""
+    Obsługuje sufiks literowy, także kilkuliterowy (36a, 59aa), indeks górny
+    (385¹/385[1]/385(1)) i § jako jednostkę redakcyjną (KC numeruje paragrafami)."""
     m = re.match(
         r'(?:art\.|§)\s*'
-        r'(\d+[a-z]?(?:\s*(?:[¹²³⁴⁵⁶⁷⁸⁹]+|\[\d+[a-z]?\]|\(\d+[a-z]?\)|\^\d+))?)\s*'  # numer art. + opc. indeks (385¹, 18[3d])
+        r'(\d+[a-z]*(?:\s*(?:[¹²³⁴⁵⁶⁷⁸⁹]+|\[\d+[a-z]*\]|\(\d+[a-z]*\)|\^\d+))?)\s*'  # numer art. (36a, 59aa) + opc. indeks (385¹, 18[3d])
         r'(?:(?:ust\.|§)\s*(\d+\w?))?\s*'                                 # ustęp ALBO paragraf
         r'(?:(?:pkt|lit\.)\s*\S+\s*)?(.+)',                               # pkt/lit ignorowane; kod aktu
         _indeks_na_nawias(raw.strip()), re.IGNORECASE,
@@ -128,15 +128,15 @@ def parse_citation(raw: str) -> dict | None:
 def _art_regex(raw_art: str) -> str:
     """Buduje fragment regex dopasowujący numer artykułu w tekście źródła,
     tolerancyjnie na spacje. 385¹→'385\\s+1' (źródło: „Art. 385 1 ."),
-    36a→'36\\s*a', 45→'45'."""
+    36a→'36\\s*a', 59aa→'59\\s*aa', 45→'45'."""
     s = re.sub(r'([¹²³⁴⁵⁶⁷⁸⁹⁰]+)', lambda mm: ' ' + mm.group(1).translate(_SUP), raw_art.strip())
     s = re.sub(r'\s*[\[\(\^]\s*(\d+)\s*[\]\)]?', r' \1', s)  # [1]/(1)/^1 → " 1"
     s = re.sub(r'\s+', ' ', s).strip()
     parts = s.split(' ')
     if len(parts) == 2 and parts[1].isdigit():               # baza + indeks górny
         return rf'{re.escape(parts[0])}\s+{re.escape(parts[1])}'
-    mlet = re.match(r'^(\d+)([a-zA-Z])$', parts[0])
-    if mlet:                                                  # sufiks literowy 36a
+    mlet = re.match(r'^(\d+)([a-zA-Z]+)$', parts[0])
+    if mlet:                                                  # sufiks literowy 36a, 59aa
         return rf'{mlet.group(1)}\s*{mlet.group(2)}'
     return re.escape(parts[0])
 
@@ -472,13 +472,21 @@ def _data_wejscia(mapa: dict[str, str], nr: str, krok: int = 0) -> _dt.date | No
     odnośniku 3."), a data stoi dopiero w tym docelowym — dlatego idziemy po
     łańcuchu. Odnośnik mówiący „obowiązuje DO wejścia w życie zmiany" opisuje
     koniec, nie początek, więc nie daje daty.
+
+    Gdy odnośnik podaje dwie daty, pierwsza dotyczy ustawy zmieniającej, a
+    druga — po średniku — samego przepisu („…ustawy (Dz. U. poz. 507), która
+    wejdzie w życie z dniem 14 października 2026 r.; wejdzie w życie z dniem
+    1 listopada 2028 r.”, art. 860 § 3 k.c.). Dla jednostki z tym odnośnikiem
+    rozstrzyga druga; dla odnośnika, który tylko odsyła do tej ustawy („o
+    której mowa w odnośniku 13”) — pierwsza.
     """
     tresc = mapa.get(nr)
     if tresc is None or krok > 3:
         return None
     if _DO_WEJSCIA_RE.search(tresc):
         return None
-    m = _W_ZYCIE_RE.search(tresc)
+    daty = list(_W_ZYCIE_RE.finditer(tresc))
+    m = (daty[0] if krok else daty[-1]) if daty else None
     if m:
         mies = _MIESIACE.get(m.group(2).lower())
         if mies:
@@ -490,20 +498,55 @@ def _data_wejscia(mapa: dict[str, str], nr: str, krok: int = 0) -> _dt.date | No
     return _data_wejscia(mapa, dalej.group(1), krok + 1) if dalej else None
 
 
+# Odnośnik jednostki, której przed datą wejścia w życie po prostu nie ma:
+# „Dodany przez art. 1 pkt 4 lit. b ustawy…”, „Wejdzie w życie z dniem…”.
+_DODANA_RE = re.compile(r'^\s*(?:dodan[yae]\b|wejdzie\s+w\s+życie|wchodzi\s+w\s+życie)',
+                        re.IGNORECASE)
+
+
+def _jeszcze_nie(mapa: dict[str, str], nr: str | None,
+                 dzis: _dt.date) -> tuple[_dt.date, bool] | None:
+    """Czy jednostka wydrukowana RAZ, z odnośnikiem nr przy swoim oznaczeniu,
+    jeszcze nie obowiązuje. Zwraca (data wejścia w życie, czy to jednostka
+    dodana) albo None, gdy odnośnik nie podaje przyszłej daty.
+
+    Tekst jednolity drukuje jednostki dodane nowelizacją, która jeszcze nie
+    weszła w życie (art. 94 pkt 2c k.p. w t.j. 2026: od 5.11.2026). Jednostki
+    dodanej przed tą datą nie ma, więc się ją pomija. Inny odnośnik z przyszłą
+    datą przy jedynym brzmieniu („W brzmieniu ustalonym przez…”) oznacza, że
+    tekst nie drukuje brzmienia obowiązującego dziś — tego nie da się
+    rozstrzygnąć, stąd druga wartość False (odmowa)."""
+    if not nr:
+        return None
+    data = _data_wejscia(mapa, nr)
+    if data is None or data <= dzis:
+        return None
+    return data, bool(_DODANA_RE.match(mapa.get(nr) or ""))
+
+
 def _kanon_art(raw_art: str) -> str | None:
     """Numer artykułu w zapisie, jakim posługuje się źródło w data-id:
-    385¹/385[1]/385(1) → '385_1', 36a → '36a', 45 → '45'."""
+    385¹/385[1]/385(1) → '385_1', 36a → '36a', 59aa → '59aa', 45 → '45'."""
     s = re.sub(r'\s+', '', raw_art.strip())
     s = re.sub(r'([¹²³⁴⁵⁶⁷⁸⁹⁰]+)', lambda m: '_' + m.group(1).translate(_SUP), s)
-    s = re.sub(r'[\[\(\^]\s*(\d+[a-z]?)\s*[\]\)]?', r'_\1', s).lower()
-    return s if re.fullmatch(r'\d+[a-ząćęłńóśźż]*(?:_\d+[a-ząćęłńóśźż]?)*', s) else None
+    s = re.sub(r'[\[\(\^]\s*(\d+[a-z]*)\s*[\]\)]?', r'_\1', s).lower()
+    return s if re.fullmatch(r'\d+[a-ząćęłńóśźż]*(?:_\d+[a-ząćęłńóśźż]*)*', s) else None
 
 
 _SUB_RE = re.compile(r'<div class="unit unit_(?:para|pint|lett|tire|ustp)[^"]*" id="[^"]*" data-id="([^"]+)"')
+_JEDN_RE = re.compile(r'<div class="unit unit_')
+# (klucz aktu, numer artykułu, które wystąpienie) → (data wejścia w życie, czy
+# artykuł dodany): brzmienie wydrukowane w tekście jednolitym z wyprzedzeniem
+_przyszle_jedn: dict[tuple, tuple] = {}
 # (klucz aktu, numer artykułu, które wystąpienie) → uwagi o wyborze brzmienia
 # podjednostek; wartość NIEJEDNOZNACZNE = nie da się ustalić, które obowiązuje
 _uwagi_jedn: dict[tuple, list[str]] = {}
 NIEJEDNOZNACZNE = "NIEJEDNOZNACZNE"
+
+
+def _uwaga_pominieta(opis: str, data: _dt.date) -> str:
+    return (f"⚠ Pominięto {opis}: tekst jednolity drukuje tę jednostkę z wyprzedzeniem — "
+            f"wejdzie w życie {data:%d.%m.%Y} i do tego dnia nie obowiązuje.")
 
 
 def _opis_jednostki(data_id: str) -> str:
@@ -526,6 +569,20 @@ def _dzieci(html: str, start: int, end: int) -> list[tuple[str, int, int]]:
     return out
 
 
+def _wlasny_odnosnik_html(html: str, start: int, end: int) -> str | None:
+    """Numer odnośnika stojącego przy samym oznaczeniu jednostki otwartej na
+    pozycji start („§ 1¹⁵⁾”, „2c)²⁷⁾”, „Art. 479⁴⁵. (uchylony)⁶⁸⁾”) — a nie
+    pierwszego odnośnika gdziekolwiek w jej treści ani w jej podjednostkach."""
+    otw = html.find(">", start) + 1
+    nast = _JEDN_RE.search(html, otw, end)
+    odn = _PIERWSZY_ODNOSNIK_RE.search(html, otw, nast.start() if nast else end)
+    if not odn:
+        return None
+    przed = re.sub(r'\s+', ' ', _html.unescape(re.sub(r'<[^>]+>', ' ', html[otw:odn.start()])))
+    przed = re.sub(r'\(\s*\w+(?:\s+\w+)?\s*\)\s*$', '', przed.strip())
+    return odn.group(1) if len(przed.strip()) <= 14 else None
+
+
 def _wybierz_podjednostki_html(html: str, mapa: dict[str, str], dzis: _dt.date,
                                uwagi: list[str]) -> str:
     """Usuwa z fragmentu artykułu nieobowiązujące brzmienia podjednostek.
@@ -535,6 +592,9 @@ def _wybierz_podjednostki_html(html: str, mapa: dict[str, str], dzis: _dt.date,
     („wejdzie w życie z dniem…”). Art. 131¹ᵃ § 1 k.p.c. w t.j. 2026: brzmienie
     do 31.05.2026 i od 1.06.2026. Rozstrzyga data z odnośnika, jak na poziomie
     artykułu. Gdy daty nie da się odczytać — uwaga NIEJEDNOZNACZNE (odmowa).
+
+    Usuwa też podjednostkę wydrukowaną raz, ale dodaną nowelizacją, która
+    jeszcze nie weszła w życie (odnośnik „Dodany przez…” z przyszłą datą).
     """
     wytnij: list[tuple[int, int]] = []
 
@@ -551,6 +611,15 @@ def _wybierz_podjednostki_html(html: str, mapa: dict[str, str], dzis: _dt.date,
                 grupy.append((did, [i]))
         for did, idx in grupy:
             if len(idx) < 2:
+                _, x, y = dzieci[idx[0]]
+                stan = _jeszcze_nie(mapa, _wlasny_odnosnik_html(html, x, y), dzis)
+                if stan and stan[1]:
+                    wytnij.append((x, y))
+                    uwagi.append(_uwaga_pominieta(_opis_jednostki(did), stan[0]))
+                elif stan:
+                    uwagi.append(NIEJEDNOZNACZNE)
+                    uwagi.append(f"{_opis_jednostki(did)}: jedyne wydrukowane brzmienie "
+                                 f"obowiązuje dopiero od {stan[0]:%d.%m.%Y}")
                 continue
             daty = []
             for i in idx:
@@ -599,12 +668,15 @@ def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | 
             continue
         fragment = raw_html[m.start():_koniec_div(raw_html, m.start())]
         odn = _PIERWSZY_ODNOSNIK_RE.search(fragment)
+        przyszle = _jeszcze_nie(mapa, _wlasny_odnosnik_html(fragment, 0, len(fragment)), dzis)
         uwagi: list[str] = []
         fragment = _wybierz_podjednostki_html(fragment, mapa, dzis, uwagi)
         num = m.group(2).lower()
+        ktore = sum(1 for n, *_ in out if n == num)
         if uwagi:
-            ktore = sum(1 for n, *_ in out if n == num)
             _uwagi_jedn[(key, num, ktore)] = uwagi
+        if przyszle:
+            _przyszle_jedn[(key, num, ktore)] = przyszle
         out.append((num, _strip_html(fragment),
                     _data_wejscia(mapa, odn.group(1)) if odn else None))
     out = _napraw_zlepki(key, out)
@@ -642,6 +714,28 @@ class Niejednoznaczne(Exception):
     się ustalić, które obowiązuje — narzędzie odmawia zamiast zgadywać."""
 
 
+class JeszczeNieObowiazuje(Exception):
+    """Tekst jednolity drukuje artykuł z wyprzedzeniem: jego jedyne (albo
+    pierwsze) brzmienie wejdzie w życie dopiero w podanym dniu."""
+
+    def __init__(self, data: _dt.date, dodany: bool):
+        super().__init__(f"{data:%d.%m.%Y}")
+        self.data, self.dodany = data, dodany
+
+
+def _odmowa_przyszly(info: dict, ref: str, adres: str, url_pdf: str,
+                     data: _dt.date, dodany: bool) -> str:
+    if dodany:
+        return (f"❌ {ref} {info['name']}: przepis jeszcze nie obowiązuje. Tekst jednolity "
+                f"({adres}) drukuje go z wyprzedzeniem — dodaje go nowelizacja, która wejdzie "
+                f"w życie {data:%d.%m.%Y}. Do tego dnia tego artykułu nie ma w obowiązującym "
+                f"stanie prawnym, więc jego brzmienia nie podaję.\n"
+                f"Przyszłe brzmienie w Dz.U.: {url_pdf}")
+    return (f"❌ {ref} {info['name']}: tekst jednolity ({adres}) drukuje tylko brzmienie, które "
+            f"wejdzie w życie {data:%d.%m.%Y}, a brzmienia obowiązującego dziś w nim nie ma — "
+            f"nie podaję przyszłego brzmienia jako obowiązującego.\nSprawdź w Dz.U.: {url_pdf}")
+
+
 def extract_pl_article_html(key: str, raw_html: str, art: str,
                             ustep: str | None) -> str | None:
     """Wycina artykuł po znacznikach jednostek redakcyjnych źródła.
@@ -675,6 +769,9 @@ def extract_pl_article_html(key: str, raw_html: str, art: str,
             elif data <= dzis:
                 wybor = i
     tekst, data_wyboru = trafienia[wybor]
+    przyszle = _przyszle_jedn.get((key, klucz, wybor))
+    if przyszle:
+        raise JeszczeNieObowiazuje(*przyszle)
     uwagi_pod = _uwagi_jedn.get((key, klucz, wybor), [])
     if NIEJEDNOZNACZNE in uwagi_pod:
         raise Niejednoznaczne("; ".join(u for u in uwagi_pod if u != NIEJEDNOZNACZNE))
@@ -839,6 +936,10 @@ async def _odpowiedz_pl(info: dict, art: str, ustep: str | None, ref: str) -> st
             return (f"❌ {ref} {info['name']}: tekst jednolity drukuje kilka brzmień tej "
                     f"jednostki i z odnośników nie da się ustalić, które obowiązuje ({e}). "
                     f"Sprawdź w Dz.U.: https://api.sejm.gov.pl/eli/acts/{najnowszy['id']}/text.pdf")
+        except JeszczeNieObowiazuje as e:
+            return _odmowa_przyszly(
+                info, ref, najnowszy["meta"].get("displayAddress") or najnowszy["id"],
+                f"https://api.sejm.gov.pl/eli/acts/{najnowszy['id']}/text.pdf", e.data, e.dodany)
         if result is None and not (raw and _kanon_art(art) and any(
                 n == _kanon_art(art) for n, *_ in _jednostki_html(key, raw))):
             # ścieżka zapasowa (regex po tekście) tylko, gdy struktura źródła nie zna
@@ -919,6 +1020,11 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
     dzis = _dt.date.today()
     wybor, nieznane = _wybierz_brzmienie([j.data for j in trafienia], dzis)
     jedn = trafienia[wybor]
+    # artykuł wydrukowany z wyprzedzeniem (dodany nowelizacją, która jeszcze nie
+    # weszła w życie) nie jest obowiązującym brzmieniem
+    przyszle = _jeszcze_nie(od.przypisy, jedn.wlasny_odnosnik, dzis)
+    if przyszle:
+        return _odmowa_przyszly(info, ref, adres, url_pdf, *przyszle)
     if jedn.niejednoznaczne:
         return _odmowa_pdf(info, ref, ident, adres, url_pdf,
                            "tekst jednolity drukuje kilka brzmień jednostki i z odnośników nie da "
@@ -930,7 +1036,7 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
     zmieniajace = najnowszy.get("zmieniajace") or []
     # kontrola 2: warstwa tekstowa PDF drugim czytnikiem
     if od.raw_tok:
-        w = pdf_tj.wiernosc_pdftotext(jedn, od.raw_tok, od.dozwolone)
+        w = pdf_tj.wiernosc_pdftotext(jedn, od.raw_tok, od.wyjasnienia)
         kontrola_pdf = "zaliczona" if w.ok else f"niezaliczona ({w.powod})"
     else:
         w = None

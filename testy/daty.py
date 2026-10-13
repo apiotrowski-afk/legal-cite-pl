@@ -29,6 +29,15 @@ MAPA = {
     '77': 'Ze zmianą wprowadzoną przez art. 2 pkt 1 ustawy, o której mowa w odnośniku 71.',
     '71': 'Tytuł działu ze zmianą wprowadzoną przez art. 2 pkt 1 ustawy z dnia 12 lipca '
           '2024 r. (Dz. U. poz. 1222), która wejdzie w życie z dniem 10 listopada 2024 r.',
+    # dwie daty: pierwsza to wejście w życie ustawy zmieniającej, druga (po
+    # średniku) — samego przepisu; realne odnośniki z t.j. k.c. (DU/2026/795)
+    '13': 'Dodany przez art. 2 ustawy z dnia 13 marca 2026 r. o zmianie ustawy o Centralnej '
+          'Ewidencji i Informacji o Działalności Gospodarczej i Punkcie Informacji dla '
+          'Przedsiębiorcy oraz niektórych innych ustaw (Dz. U. poz. 507), która wejdzie w '
+          'życie z dniem 14 października 2026 r.; wejdzie w życie z dniem 1 listopada 2028 r.',
+    '4': 'W brzmieniu ustalonym przez art. 1 pkt 2 ustawy (Dz. U. poz. 1172), która weszła '
+         'w życie z dniem 1 marca 2026 r.; wszedł w życie z dniem 27 listopada 2025 r.',
+    '14': 'Dodany przez art. 2 ustawy, o której mowa w odnośniku 13.',
     # łańcuch dłuższy niż dopuszczony (ochrona przed pętlą i przed zgadywaniem)
     'a': 'o której mowa w odnośniku b', 'b': 'o której mowa w odnośniku c',
     'c': 'o której mowa w odnośniku d', 'd': 'o której mowa w odnośniku e',
@@ -46,6 +55,9 @@ PRZYPADKI = [
     ('7', dt.date(2024, 11, 10), 'odesłanie o jeden krok'),
     ('9', dt.date(2024, 11, 10), 'odesłanie o jeden krok, inna formuła'),
     ('77', dt.date(2024, 11, 10), 'odesłanie o dwa kroki'),
+    ('13', dt.date(2028, 11, 1), 'dwie daty: rozstrzyga data przepisu, nie ustawy'),
+    ('4', dt.date(2025, 11, 27), 'dwie daty, przepis wszedł w życie wcześniej niż ustawa'),
+    ('14', dt.date(2026, 10, 14), 'odesłanie do ustawy z odnośnika o dwóch datach: data ustawy'),
     ('67', None, '„obowiązuje DO wejścia w życie" to koniec, nie początek'),
     ('8', None, 'to samo, bez „w tym brzmieniu"'),
     ('76', None, 'to samo, z „w tym brzmieniu"'),
