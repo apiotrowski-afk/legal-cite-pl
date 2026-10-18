@@ -37,6 +37,33 @@ PL_ACTS: dict[str, dict] = {
     "KRiO":     dict(pub="DU", year=1964, pos=59,   name="Kodeks rodzinny i opiekuńczy"),
     "u.k.s.c.": dict(pub="DU", year=2005, pos=1398, name="Ustawa o kosztach sądowych w sprawach cywilnych"),
     "UKSC":     dict(pub="DU", year=2005, pos=1398, name="Ustawa o kosztach sądowych w sprawach cywilnych"),
+    # księgi wieczyste, karne i administracyjne (pozycje sprawdzone w ELI 2026-10-18).
+    # Konstytucji celowo nie ma: ELI ma tylko PDF pierwotny z 1997 r. (bez zmian
+    # z 2006 i 2009), a jego warstwa tekstowa nie przechodzi kontroli odczytu.
+    "u.k.w.h.": dict(pub="DU", year=1982, pos=147,  name="Ustawa o księgach wieczystych i hipotece"),
+    "u.c.":     dict(pub="DU", year=2013, pos=1650, name="Ustawa o cudzoziemcach"),
+    "ustawy o cudzoziemcach": dict(pub="DU", year=2013, pos=1650, name="Ustawa o cudzoziemcach"),
+    "KW":      dict(pub="DU", year=1971, pos=114,  name="Kodeks wykroczeń"),
+    "KPK":      dict(pub="DU", year=1997, pos=555,  name="Kodeks postępowania karnego"),
+    "KKS":      dict(pub="DU", year=1999, pos=930,  name="Kodeks karny skarbowy"),
+    "KPA":      dict(pub="DU", year=1960, pos=168,  name="Kodeks postępowania administracyjnego"),
+    "PPSA":     dict(pub="DU", year=2002, pos=1270, name="Prawo o postępowaniu przed sądami administracyjnymi"),
+    # podatkowe i majątkowe
+    "O.p.":     dict(pub="DU", year=1997, pos=926,  name="Ordynacja podatkowa"),
+    "Ordynacja podatkowa": dict(pub="DU", year=1997, pos=926, name="Ordynacja podatkowa"),
+    "Ordynacji podatkowej": dict(pub="DU", year=1997, pos=926, name="Ordynacja podatkowa"),
+    "u.p.d.o.f.": dict(pub="DU", year=1991, pos=350, name="Ustawa o podatku dochodowym od osób fizycznych (PIT)"),
+    "PIT":      dict(pub="DU", year=1991, pos=350,  name="Ustawa o podatku dochodowym od osób fizycznych (PIT)"),
+    "ustawy o PIT": dict(pub="DU", year=1991, pos=350, name="Ustawa o podatku dochodowym od osób fizycznych (PIT)"),
+    "u.p.d.o.p.": dict(pub="DU", year=1992, pos=86, name="Ustawa o podatku dochodowym od osób prawnych (CIT)"),
+    "CIT":      dict(pub="DU", year=1992, pos=86,   name="Ustawa o podatku dochodowym od osób prawnych (CIT)"),
+    "ustawy o CIT": dict(pub="DU", year=1992, pos=86, name="Ustawa o podatku dochodowym od osób prawnych (CIT)"),
+    "u.f.r.":   dict(pub="DU", year=2023, pos=326,  name="Ustawa o fundacji rodzinnej"),
+    "ustawy o fundacji rodzinnej": dict(pub="DU", year=2023, pos=326, name="Ustawa o fundacji rodzinnej"),
+    "u.p.s.d.": dict(pub="DU", year=1983, pos=207,  name="Ustawa o podatku od spadków i darowizn"),
+    "ustawy o podatku od spadkow i darowizn": dict(pub="DU", year=1983, pos=207, name="Ustawa o podatku od spadków i darowizn"),
+    "u.KRS":    dict(pub="DU", year=1997, pos=769,  name="Ustawa o Krajowym Rejestrze Sądowym"),
+    "ustawy o KRS": dict(pub="DU", year=1997, pos=769, name="Ustawa o Krajowym Rejestrze Sądowym"),
 }
 
 # --- Akty UE → EUR-Lex (tekst polski), klucz = CELEX ---
