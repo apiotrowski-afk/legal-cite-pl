@@ -139,15 +139,20 @@ def parse_citation(raw: str) -> dict | None:
     m = re.match(
         r'(?:art\.|§)\s*'
         r'(\d+[a-z]*(?:\s*(?:[¹²³⁴⁵⁶⁷⁸⁹]+|\[\d+[a-z]*\]|\(\d+[a-z]*\)|\^\d+))?)\s*'  # numer art. (36a, 59aa) + opc. indeks (385¹, 18[3d])
-        r'(?:(?:ust\.|§)\s*(\d+\w?))?\s*'                                 # ustęp ALBO paragraf
+        r'(?:(?:ust\.|§)\s*(\d+[a-z]*(?:\s*(?:\[\d+[a-z]*\]|\(\d+[a-z]*\)|\^\d+))?))?\s*'  # ustęp ALBO paragraf, też § 1¹ / § 2[1]
         r'(?:(?:pkt|lit\.)\s*\S+\s*)?(.+)',                               # pkt/lit ignorowane; kod aktu
         _indeks_na_nawias(raw.strip()), re.IGNORECASE,
     )
     if not m:
         return None
+    ustep = m.group(2)
+    if ustep:
+        # jeden zapis indeksu dla reszty parsera: 1(1) / 1^1 / 1 [1] → 1[1]
+        ustep = re.sub(r'\s*(?:\[(\w+)\]|\((\w+)\)|\^(\w+))',
+                       lambda x: f"[{x.group(1) or x.group(2) or x.group(3)}]", ustep)
     return {
         "art": m.group(1).strip(),
-        "ustep": m.group(2),
+        "ustep": ustep,
         "act": m.group(3).strip().rstrip('.').strip(),
     }
 
@@ -280,6 +285,100 @@ async def _fetch_pl(info: dict) -> str | None:
     return None
 
 
+_SPARQL = "https://publications.europa.eu/webapi/rdf/sparql"
+# CELEX → (czas, wersja); tylko udane odpytania — awaria SPARQL nie jest
+# zapamiętywana, żeby chwilowy błąd nie przypiął tekstu pierwotnego na stałe
+_wersje_eu: dict[str, tuple[float, dict]] = {}
+_WERSJE_EU_TTL = 6 * 3600
+
+
+async def _sparql(zapytanie: str) -> list[dict]:
+    # jedno ponowienie: endpoint Urzędu Publikacji miewa pojedyncze odmowy
+    async with httpx.AsyncClient(timeout=30, headers={
+            **_HEADERS, "Accept": "application/sparql-results+json"}) as c:
+        for proba in range(2):
+            try:
+                resp = await c.get(_SPARQL, params={"query": zapytanie})
+                resp.raise_for_status()
+                break
+            except httpx.HTTPError:
+                if proba:
+                    raise
+    return [{k: v["value"] for k, v in b.items()}
+            for b in resp.json()["results"]["bindings"]]
+
+
+async def _wersja_eu(celex: str) -> dict:
+    """Ustala, z której wersji aktu UE cytować.
+
+    CELEX 3… to tekst pierwotny z Dz.U. UE — bez późniejszych zmian (AI Act:
+    brak art. 111 ust. 4 dodanego rozporządzeniem 2026/1744). Wersje
+    skonsolidowane mają CELEX 0…-RRRRMMDD (data, od której obowiązuje dana
+    wersja). Bierzemy najnowszą obowiązującą dziś i osobno wypisujemy akty
+    zmieniające, które weszły w życie po jej dacie — konsolidacja bywa
+    spóźniona względem zmian.
+    """
+    teraz = time.time()
+    if celex in _wersje_eu and teraz - _wersje_eu[celex][0] < _WERSJE_EU_TTL:
+        return _wersje_eu[celex][1]
+    dzis = _dt.date.today()
+    prefiks = "0" + celex[1:] + "-"
+    try:
+        kons = await _sparql(
+            "PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>\n"
+            "SELECT DISTINCT ?celex WHERE { ?w cdm:resource_legal_id_celex ?celex . "
+            f'FILTER(STRSTARTS(STR(?celex), "{prefiks}")) }}')
+        zmiany = await _sparql(
+            "PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>\n"
+            "SELECT DISTINCT ?celex ?eif WHERE { ?a cdm:resource_legal_amends_resource_legal ?b . "
+            f'?b cdm:resource_legal_id_celex ?bc . FILTER(STR(?bc) = "{celex}") '
+            "?a cdm:resource_legal_id_celex ?celex . "
+            "OPTIONAL { ?a cdm:resource_legal_date_entry-into-force ?eif } }")
+    except (httpx.HTTPError, KeyError, ValueError) as e:
+        logger.info("sparql celex=%s blad=%s", celex, type(e).__name__)
+        return {"celex": celex, "data": None, "blad": True, "zmieniajace": []}
+
+    daty = []
+    for k in kons:
+        m = re.fullmatch(re.escape(prefiks) + r"(\d{8})", k["celex"])
+        if m:
+            d = _dt.datetime.strptime(m.group(1), "%Y%m%d").date()
+            if d <= dzis:
+                daty.append((d, k["celex"]))
+    zmieniajace = []
+    for z in zmiany:
+        try:
+            eif = _dt.date.fromisoformat(z.get("eif", "")[:10])
+        except ValueError:
+            eif = None
+        zmieniajace.append((z["celex"], eif))
+    if daty:
+        data, wybrany = max(daty)
+    else:
+        data, wybrany = None, celex
+    wersja = {"celex": wybrany, "data": data, "blad": False,
+              "zmieniajace": sorted(set(zmieniajace), key=lambda x: (x[1] or dzis, x[0]))}
+    _wersje_eu[celex] = (teraz, wersja)
+    return wersja
+
+
+# znaczniki tekstu skonsolidowanego: ▼B / ►M1 … ◄ (B = akt podstawowy,
+# M = akt zmieniający, A = akt przystąpienia, C = sprostowanie)
+_ZNACZNIK_EU_RE = re.compile(r'[►▼]\s?([BMAC]\d*)\b\s?|\s?◄')
+
+
+def _legenda_zmian(tekst: str) -> dict[str, str]:
+    """„►M1 ROZPORZĄDZENIE … (UE) 2026/1744 z dnia 8 lipca 2026 r.” z nagłówka
+    tekstu skonsolidowanego → {"M1": opis}."""
+    glowa = tekst[:tekst.find("▼B")] if "▼B" in tekst else tekst[:5000]
+    legenda = {m.group(1): re.sub(r'\s+', ' ', m.group(2)).strip()
+               for m in re.finditer(r'►([MA]\d+)\s+(.{10,300}?\bz dnia \d{1,2} \S+ \d{4} r\.)', glowa)}
+    # „►C1 Sprostowanie, Dz.U. L 127, 23.5.2018, s. 2 (2016/679)”
+    legenda.update({m.group(1): m.group(2).strip()
+                    for m in re.finditer(r'►(C\d+)\s+(Sprostowanie,[^►▼]{5,120}?\(\d{2,4}/\d+\))', glowa)})
+    return legenda
+
+
 async def _fetch_eu(info: dict) -> str | None:
     """Pobiera polski tekst aktu UE — najpierw z CELLAR, potem z EUR-Lex.
 
@@ -287,7 +386,8 @@ async def _fetch_eu(info: dict) -> str | None:
     treści. Blokada nie jest stała: na tym samym kliencie potrafi włączyć się
     w ciągu dnia, więc nie da się jej obejść retrajem ani nagłówkiem. CELLAR
     to interfejs maszynowy Urzędu Publikacji z negocjacją treści — ten sam
-    dokument, bez bramki dla przeglądarek.
+    dokument, bez bramki dla przeglądarek. `info['celex']` może być CELEX-em
+    wersji skonsolidowanej (0…-RRRRMMDD).
     """
     key = f"EU:{info['celex']}"
     if key in _cache:
@@ -319,14 +419,37 @@ async def _fetch_eu(info: dict) -> str | None:
     return None
 
 
+# Nagłówek ustępu/paragrafu z opcjonalną literą i indeksem górnym. Źródła piszą
+# indeks na trzy sposoby: HTML ELI „§ 1 1 .”, odczyt PDF „§ 1 1.”, druk 2026
+# „§ 1[1].”, rzadziej wprost „§ 1¹.”. Lookbehind (?<!\d\s) nie pozwala wziąć
+# samego indeksu („1.” w „§ 1 1.”) za początek jednostki.
+_IDX_SUP = "[¹²³⁴⁵⁶⁷⁸⁹⁰ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ]+"
+_JEDN_USTEP_RE = re.compile(
+    rf'(?:§\s*)?(?<![\d\w])(?<!\d\s)\d+[a-z]{{0,2}}'
+    rf'(?:\s+\d+[a-z]?(?=\s?\.\s)|\s*\[\d+[a-z]?\]|{_IDX_SUP})?\s?\.\s')
+
+
 def _cut_ustep(art_text: str, ustep: str) -> str | None:
-    # ustęp „N." LUB paragraf „§ N." (KC); granica = następna jednostka tej samej rangi
-    m = re.search(rf'(?:§\s*)?(?<!\d){re.escape(ustep)}\.\s', art_text)
+    # ustęp „N." LUB paragraf „§ N." (KC); granica = następna jednostka tej samej
+    # rangi — także z literą (1a) albo indeksem (§ 1¹), które wcześniej doklejały
+    # się do poprzedniej jednostki („§ 1” art. 98 k.p.c. zabierał § 1¹ i § 1²)
+    m = re.fullmatch(r'(\d+[a-z]*)(?:\[(\d+[a-z]*)\])?', ustep.strip())
+    if not m:
+        return None
+    baza, idx = m.group(1), m.group(2)
+    if idx:
+        sup = idx.translate(str.maketrans("0123456789abcdefghijklmnoprstuvwxyz",
+                                          "⁰¹²³⁴⁵⁶⁷⁸⁹ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ"))
+        nr = (rf'{re.escape(baza)}(?:\s+{re.escape(idx)}|\s*\[{re.escape(idx)}\]'
+              rf'|{re.escape(sup)})\s?\.\s')
+    else:
+        nr = rf'{re.escape(baza)}\.\s'
+    m = re.search(rf'(?:§\s*)?(?<![\d\w])(?<!\d\s){nr}', art_text)
     if not m:
         return None
     ust_start = m.start()
-    nxt = re.search(r'(?:§\s*)?(?<!\d)\d+\.\s', art_text[m.end():])
-    ust_end = m.end() + nxt.start() if nxt else len(art_text)
+    nxt = _JEDN_USTEP_RE.search(art_text, m.end())
+    ust_end = nxt.start() if nxt else len(art_text)
     return art_text[ust_start:ust_end].strip()
 
 
@@ -1158,6 +1281,77 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
             f"{'nie_dotyczy' if zrodlo == 'urzedowy_html' else 'tak'}")
 
 
+async def _odpowiedz_eu(info: dict, art: str, ustep: str | None, ref: str) -> str:
+    """Artykuł aktu UE z najnowszej obowiązującej wersji skonsolidowanej, a gdy
+    jej nie ma — z tekstu pierwotnego, z jawną informacją o zmianach."""
+    dzis = _dt.date.today()
+    wersja = await _wersja_eu(info["celex"])
+    skons = wersja["celex"] != info["celex"]
+    uwaga_pobrania = ""
+    text = await _fetch_eu({**info, "celex": wersja["celex"]})
+    if text is None and skons:
+        uwaga_pobrania = (f"⚠ Nie udało się pobrać wersji skonsolidowanej {wersja['celex']} "
+                          f"— poniżej tekst pierwotny.\n")
+        skons = False
+        text = await _fetch_eu(info)
+    if text is None:
+        return f"❌ Nie udało się pobrać {info['name']} z EUR-Lex"
+    celex = wersja["celex"] if skons else info["celex"]
+    opis_wersji = (f"tekst skonsolidowany {celex}, stan na {wersja['data']:%d.%m.%Y}"
+                   if skons else f"tekst pierwotny {celex}")
+
+    art_text = extract_eu_article(text, art, None)
+    if not art_text:
+        return (f"❌ {ref} nie znaleziony w {info['name']} ({opis_wersji}). "
+                f"Sprawdź numer artykułu.")
+    kody = sorted({k for k in _ZNACZNIK_EU_RE.findall(art_text) if k and k != "B"})
+    result = re.sub(r' {2,}', ' ', _ZNACZNIK_EU_RE.sub(' ', art_text)).strip()
+    if ustep:
+        result = _cut_ustep(result, ustep)
+        if not result:
+            return (f"❌ {ref} nie znaleziony w {info['name']} ({opis_wersji}). "
+                    f"Sprawdź numer ustępu.")
+
+    zm = wersja["zmieniajace"]
+    po = [c for c, d in zm if d and d <= dzis and (not skons or d > wersja["data"])]
+    przyszle = [f"{c} (od {d:%d.%m.%Y})" for c, d in zm if d and d > dzis]
+    if wersja["blad"]:
+        aktualnosc = ("nieustalona — CELLAR nie odpowiedział na pytanie o wersje "
+                      "skonsolidowane i akty zmieniające; to tekst pierwotny, mógł zostać zmieniony")
+        akt_kod = "nieustalona_blad_cellar"
+    elif po:
+        aktualnosc = (f"nieustalona — {'po dacie tej wersji ' if skons else ''}weszły w życie "
+                      f"akty zmieniające: {', '.join(po)}; sprawdź, czy dotyczą tego artykułu")
+        akt_kod = f"nieustalona_{len(po)}_aktow_zmieniajacych_po_wersji"
+    else:
+        aktualnosc = ("wg CELLAR " + (f"po dacie tej wersji ({wersja['data']:%d.%m.%Y}) "
+                                      if skons else "")
+                      + "nie wszedł w życie żaden akt zmieniający")
+        akt_kod = "potwierdzona_wg_cellar"
+    if przyszle:
+        aktualnosc += f". Zmiany jeszcze nieobowiązujące: {', '.join(przyszle)}"
+
+    skad = (_zrodlo.get(f"EU:{celex}") or ("EUR-Lex",))[0]
+    if skons:
+        legenda = _legenda_zmian(text)
+        naglowek = (f"(źródło: {skad}, {opis_wersji}, wersja polska)\n"
+                    f"⚠ TEKST SKONSOLIDOWANY — nieurzędowy (służy celom informacyjnym); "
+                    f"wiążące są akty w Dz.U. UE: {info['celex']} i akty zmieniające")
+        if kody:
+            naglowek += ("\nW tym artykule są fragmenty zmienione: "
+                         + "; ".join(f"{k} = {legenda.get(k, 'sprostowanie' if k.startswith('C') else 'akt zmieniający')}"
+                                     for k in kody))
+        cytuj = f"{info['name']}, {opis_wersji} (nieurzędowy)"
+    else:
+        naglowek = f"(źródło: {skad}, CELEX {celex} — tekst pierwotny z Dz.U. UE, wersja polska)"
+        cytuj = f"{info['name']}, tekst pierwotny {celex}"
+    return (f"{'📄' if skons else '📜'} **{info['name']}**, {ref}\n{uwaga_pobrania}{naglowek}\n"
+            f"Aktualność: {aktualnosc}\n\n{result}\n\n"
+            f"[dla modelu] zrodlo={'tekst_skonsolidowany' if skons else 'tekst_pierwotny_dz_u_ue'}; "
+            f"wersja={celex}; aktualnosc={akt_kod}; cytuj_jako=„{cytuj}”; "
+            f"nie_nazywaj_tekstem_urzedowym={'tak' if skons else 'nie_dotyczy'}")
+
+
 async def verify_article(citation: str) -> str:
     """Zwraca dokładne brzmienie cytowanego przepisu ze źródła oficjalnego.
     Format: 'art. N [ust. M] KOD' (np. 'art. 45 u.k.k.', 'art. 28 ust. 3 RODO')."""
@@ -1167,7 +1361,12 @@ async def verify_article(citation: str) -> str:
                 f"Użyj: 'art. N [ust. M] KOD' — np. 'art. 45 u.k.k.'\n"
                 f"Lista kodów: list_acts().")
     act, art, ustep = parsed["act"], parsed["art"], parsed["ustep"]
-    ref = f"art. {art}" + (f" ust. {ustep}" if ustep else "")
+    # etykieta jak w cytacie: § dla paragrafów, indeks z powrotem jako górny (§ 1¹)
+    jedn = "§" if re.search(r'\d\S*\s*§', citation) else "ust."
+    ust_ety = ustep and re.sub(
+        r'\[(\w+)\]', lambda x: x.group(1).translate(str.maketrans(
+            "0123456789abcdefghijklmnoprstuvwxyz", "⁰¹²³⁴⁵⁶⁷⁸⁹ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ")), ustep)
+    ref = f"art. {art}" + (f" {jedn} {ust_ety}" if ustep else "")
     pl_key = _resolve(act, PL_ACTS)
     eu_key = _resolve(act, EU_ACTS)
 
@@ -1181,17 +1380,9 @@ async def verify_article(citation: str) -> str:
     if eu_key:
         info = EU_ACTS[eu_key]
         try:
-            text = await _fetch_eu(info)
+            return await _odpowiedz_eu(info, art, ustep, ref)
         except httpx.TimeoutException:
             return f"❌ Timeout pobierania {info['name']} z EUR-Lex"
-        if text is None:
-            return f"❌ Nie udało się pobrać {info['name']} z EUR-Lex"
-        result = extract_eu_article(text, art, ustep)
-        if not result:
-            return f"❌ {ref} nie znaleziony w {info['name']}. Sprawdź numer artykułu."
-        skad = (_zrodlo.get(f"EU:{info['celex']}") or ("EUR-Lex",))[0]
-        return (f"📜 **{info['name']}**, {ref}\n"
-                f"(źródło: {skad}, CELEX {info['celex']}, wersja polska)\n\n{result}")
 
     known = ", ".join(dict.fromkeys(list(PL_ACTS) + list(EU_ACTS)))
     return f"❌ Nieznany kod aktu: '{act}'\nObsługiwane: {known}"

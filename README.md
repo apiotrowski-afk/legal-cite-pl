@@ -5,7 +5,7 @@
 **Weryfikator cytatów prawnych (prawo PL / UE) — serwer MCP pobierający dokładne, aktualne brzmienie cytowanego artykułu prosto z oficjalnego źródła.** Narzędzie anti-halucynacyjne dla Claude (i dowolnego klienta MCP).
 
 - 🇵🇱 **PL law** — `api.sejm.gov.pl` (ELI). Returns the **consolidated text** (*tekst jednolity*, currently in force), not the original as-promulgated version.
-- 🇪🇺 **EU law** — EUR-Lex (Polish text). *Note: EUR-Lex sometimes serves a bot-challenge (HTTP 202) → returns an error instead of text.*
+- 🇪🇺 **EU law** — Publications Office CELLAR / EUR-Lex (Polish text), **latest in-force consolidated version** (CELEX `0…-YYYYMMDD`, found via the CELLAR SPARQL endpoint), not the original Official Journal text — so amendments (e.g. AI Act art. 111(4) added by Regulation 2026/1744) are not missed. Consolidated text is labelled unofficial (📄), names the amending act behind each changed article and lists amending acts that entered into force after the consolidation date. Amendment markers (►M1, ▼B) are stripped from the quote. Falls back to the original text, with an explicit note, when no consolidated version exists or SPARQL is down.
 
 Returns **only the cited article** (not the whole act). The quote comes straight from the source.
 
@@ -28,7 +28,7 @@ Measured on 2026-10-10 (8 acts whose newest consolidated text is PDF-only, 4676 
 
 ### Tools
 - `verify_article("art. 45 u.k.k.")` — the wording of a provision. Format: `art. N [ust. M] CODE`.
-  Handles letter suffixes (`art. 36a`), `§` as a unit (`art. 58 § 2 KC`), superscripts with letters (`art. 385¹` / `385[1]` / `131¹ᵃ` / `131[1a]`), dotted codes (`k.p.c.`).
+  Handles letter suffixes (`art. 36a`), `§` as a unit (`art. 58 § 2 KC`), superscript paragraphs (`art. 98 § 1¹ k.p.c.` / `§ 1[1]`), superscripts with letters (`art. 385¹` / `385[1]` / `131¹ᵃ` / `131[1a]`), dotted codes (`k.p.c.`).
   When a consolidated text prints **two wordings of the same paragraph/point** (current one and one entering into force later), the tool returns only the one in force today, chosen by the date in the footnote, and says so; if the date cannot be read, it refuses.
 - `list_acts()` — list of supported act codes (PL + EU).
 
@@ -61,9 +61,12 @@ Add an entry to `PL_ACTS` (key = abbreviation; `pub`/`year`/`pos` from the Journ
 
 ## Polski
 
+### Prawo UE
+Akty UE są cytowane z **najnowszej obowiązującej wersji skonsolidowanej** (CELEX `0…-RRRRMMDD`, ustalanej przez SPARQL CELLAR), a nie z tekstu pierwotnego z Dz.U. UE — inaczej umykają zmiany (np. art. 111 ust. 4 AI Act dodany rozporządzeniem 2026/1744). Tekst skonsolidowany jest oznaczony jako nieurzędowy (📄), z aktem zmieniającym dany artykuł i aktami zmieniającymi, które weszły w życie po dacie konsolidacji. Znaczniki ►M1/▼B są usuwane z cytatu. Gdy wersji skonsolidowanej nie ma albo SPARQL nie odpowiada — tekst pierwotny z jawną adnotacją.
+
 ### Narzędzia
 - `verify_article("art. 45 u.k.k.")` — brzmienie przepisu. Format: `art. N [ust. M] KOD`.
-  Obsługuje sufiks literowy (`art. 36a`), § jako jednostkę (`art. 58 § 2 KC`), indeks górny z literą (`art. 385¹` / `385[1]` / `131¹ᵃ` / `131[1a]`), kody z kropkami (`k.p.c.`, `k.r.o.`).
+  Obsługuje sufiks literowy (`art. 36a`), § jako jednostkę (`art. 58 § 2 KC`), paragraf z indeksem górnym (`art. 98 § 1¹ k.p.c.` / `§ 1[1]`), indeks górny z literą (`art. 385¹` / `385[1]` / `131¹ᵃ` / `131[1a]`), kody z kropkami (`k.p.c.`, `k.r.o.`).
   Gdy tekst jednolity drukuje **dwa brzmienia tego samego paragrafu, ustępu lub punktu** (obowiązujące i wchodzące w życie później), narzędzie zwraca tylko obowiązujące dziś — wybrane po dacie z odnośnika — i to zaznacza; gdy daty nie da się odczytać, odmawia.
 
 ### Teksty jednolite dostępne tylko w PDF (od 2025 r.)
