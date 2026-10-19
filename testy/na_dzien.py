@@ -12,7 +12,6 @@ NIE MOŻE być, i dopuszczalne ustalenia. Zmiany prawa użyte w testach:
     python testy/na_dzien.py
 """
 import asyncio
-import json
 import pathlib
 import re
 import sys
@@ -45,16 +44,18 @@ PRZYPADKI = [
     ("art. 14 u.ś.u.d.e.", "2026-11-20", ["Dz.U. 2026 poz. 1296", "06.11.2026", "nie obowiązuje"], [],
      ("ustalone_uchylony",)),
     ("art. 15 u.ś.u.d.e.", "2026-12-01", ["UCHYLA art. 15"], [], ("ustalone_uchylony",)),
-    ("art. 14 u.ś.u.d.e.", DZIS, ["uchyla art. 14 z dniem 06.11.2026", "Nie ponosi odpowiedzialności"], [],
-     USTAL + ("nieustalone",)),
     ("art. 2 u.ś.u.d.e.", "2026-12-01", ["Dz.U. 2026 poz. 1296"], ["UCHYLA art. 2"], USTAL + ("nieustalone",)),
     ("art. 6 RODO", "2020-01-01", ["tylko dla aktów polskich"], [], None),
     ("art. 118 KC", "2018-13-45", ["Nierozpoznana data"], [], None),
     # bez znanej odpowiedzi — sprawdzamy, że narzędzie nie udaje pewności
     ("art. 385¹ § 1 KC", "2010-01-01", ["niedozwolone postanowienia"], [], USTAL + ("nieustalone",)),
-    ("art. 148 § 1 KK", "2026-10-19", ["od lat 10"], [], USTAL + ("nieustalone",)),
+    ("art. 148 § 1 KK", DZIS, ["od lat 10"], [], USTAL + ("nieustalone",)),
+    ("art. 70 § 1 O.p.", "2020-01-01", ["5 lat"], [], USTAL + ("nieustalone",)),
     ("art. 118 KC", "2028-12-01", ["sześć lat"], [], USTAL + ("nieustalone",)),
 ]
+if DZIS < "2026-11-06":  # zapowiedziane uchylenie widać tylko przed jego datą
+    PRZYPADKI.append(("art. 14 u.ś.u.d.e.", DZIS, ["uchyla art. 14 z dniem 06.11.2026", "Nie ponosi odpowiedzialności"],
+                      [], USTAL + ("nieustalone",)))
 
 
 def ustalenie(tekst: str) -> str | None:
@@ -63,7 +64,7 @@ def ustalenie(tekst: str) -> str | None:
 
 
 async def main() -> int:
-    wyniki, bledy = [], 0
+    bledy = 0
     for cytat, dzien, musi, nie_moze, ustalenia in PRZYPADKI:
         t0 = time.monotonic()
         tekst = await na_dzien.verify_article_na_dzien(cytat, dzien)
@@ -81,9 +82,6 @@ async def main() -> int:
         bledy += bool(problemy)
         print(f"{'OK  ' if not problemy else 'BŁĄD'} {cytat:20} {dzien}  {kod or tekst[:60]!s:42} {sek:5.1f}s "
               + ("; ".join(problemy)), flush=True)
-        wyniki.append({"cytat": cytat, "dzien": dzien, "ustalenie": kod, "problemy": problemy, "tekst": tekst})
-    pathlib.Path(__file__).with_suffix(".json").write_text(
-        json.dumps(wyniki, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\n{len(PRZYPADKI) - bledy}/{len(PRZYPADKI)} zgodnych")
     return 1 if bledy else 0
 
