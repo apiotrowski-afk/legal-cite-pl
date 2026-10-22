@@ -856,6 +856,11 @@ def _wybierz_podjednostki_html(html: str, mapa: dict[str, str], dzis: _dt.date,
     return html
 
 
+# Pogrubiony nagłówek artykułu w treści akapitu: t.j. u.ś.u.d.e. (Dz.U. 2024 poz. 1513)
+# drukuje „<B>Art. 15. </B>” w akapicie art. 14 ust. 4 i nie daje art. 15 własnej jednostki.
+_WKLEJONY_ART_RE = re.compile(r'<B\b[^>]*>\s*Art\.(?:\s|&nbsp;)*(\d+[a-z]*)\s*\.\s*</B>', re.IGNORECASE)
+
+
 def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | None]]:
     """Artykuły właściwego aktu wg znaczników źródła, w kolejności dokumentu.
 
@@ -883,8 +888,17 @@ def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | 
             _uwagi_jedn[(key, num, ktore)] = uwagi
         if przyszle:
             _przyszle_jedn[(key, num, ktore)] = przyszle
-        out.append((num, _strip_html(fragment),
+        # nagłówek innego artykułu wklejony w treść tej jednostki (za jej własnym <h3>),
+        # gdy źródło nie ma dla niego osobnej jednostki — tniemy przed nim (#7)
+        wklejony = _WKLEJONY_ART_RE.search(fragment, max(fragment.find("</h3>") + 5, 5))
+        if wklejony and (wklejony.group(1).lower() == num.split("_")[0]
+                         or f'data-id="arti_{wklejony.group(1).lower()}"' in raw_html):
+            wklejony = None
+        tekst = fragment[:wklejony.start()] if wklejony else fragment
+        out.append((num, _strip_html(tekst),
                     _data_wejscia(mapa, odn.group(1)) if odn else None))
+        if wklejony:
+            out.append((wklejony.group(1).lower(), _strip_html(fragment[wklejony.start():]), None))
     out = _napraw_zlepki(key, out)
     _jedn_cache[key] = out
     return out
