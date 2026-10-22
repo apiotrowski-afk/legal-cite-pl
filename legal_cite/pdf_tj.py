@@ -590,6 +590,7 @@ class OdczytPDF:
     monotoniczne: bool
     raw_tok: list[str]
     wyjasnienia: bytearray           # które słowa warstwy to nagłówki stron i przypisy
+    md: str = ""                     # drzewo eli2md — do wyboru brzmień na inny dzień (na_dzien)
 
     def znajdz(self, klucz: str) -> list[Jednostka]:
         return [j for j in self.jednostki if j.klucz == klucz]
@@ -720,7 +721,7 @@ async def odczyt(ident: str, meta_tj: dict | None = None) -> OdczytPDF:
                           adres=meta_tj.get("displayAddress") or ident,
                           konwerter=wersja, pdftotext=wersja_pdftotext() if raw else None,
                           jednostki=jednostki, przypisy=przypisy, monotoniczne=monotoniczne,
-                          raw_tok=raw_tok, wyjasnienia=wyjasnienia)
+                          raw_tok=raw_tok, wyjasnienia=wyjasnienia, md=md)
         logger.info("odczyt pdf %s: artykulow=%d monotonicznie=%s pdftotext=%s",
                     ident, len(jednostki), monotoniczne, bool(raw))
         _odczyty[ident] = wynik

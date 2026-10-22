@@ -8,6 +8,7 @@ nie pierwotne z dnia ogłoszenia.
 from __future__ import annotations
 
 import bisect
+import contextvars
 import datetime as _dt
 import html as _html
 import re
@@ -15,6 +16,14 @@ import time
 
 import logging
 import httpx
+
+# Dzień, na który wybierane jest brzmienie (verify_article z na_dzien); domyślnie dziś.
+_NA_DZIEN: contextvars.ContextVar[_dt.date | None] = contextvars.ContextVar("na_dzien", default=None)
+
+
+def _dzis() -> _dt.date:
+    return _NA_DZIEN.get() or _dt.date.today()
+
 
 # --- Akty PL → ELI: api.sejm.gov.pl/eli/acts/{pub}/{year}/{pos}/text.html ---
 # pos = pozycja w Dzienniku Ustaw (poz. N)
@@ -872,7 +881,7 @@ def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | 
     if key in _jedn_cache:
         return _jedn_cache[key]
     mapa = _odnosniki(key, raw_html)
-    dzis = _dt.date.today()
+    dzis = _dzis()
     out = []
     for m in _UNIT_RE.finditer(raw_html):
         if 'pass_' in m.group(1):
@@ -980,7 +989,7 @@ def extract_pl_article_html(key: str, raw_html: str, art: str,
     if not trafienia:
         return None
 
-    dzis = _dt.date.today()
+    dzis = _dzis()
     wybor, nieznane = 0, False
     if len(trafienia) > 1:
         for i, (_, data) in enumerate(trafienia[1:], start=1):
@@ -1246,7 +1255,7 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
                            "numery artykułów w odczycie nie rosną w kolejności dokumentu, "
                            "więc granicom artykułów nie można ufać", starszy_id)
 
-    dzis = _dt.date.today()
+    dzis = _dzis()
     wybor, nieznane = _wybierz_brzmienie([j.data for j in trafienia], dzis)
     jedn = trafienia[wybor]
     # artykuł wydrukowany z wyprzedzeniem (dodany nowelizacją, która jeszcze nie

@@ -26,7 +26,7 @@ mcp = FastMCP("legal-cite")
 
 
 @mcp.tool()
-async def verify_article(citation: str) -> str:
+async def verify_article(citation: str, na_dzien: str | None = None) -> str:
     """Dokładne brzmienie cytowanego przepisu z OFICJALNEGO źródła
     (api.sejm.gov.pl dla PL, EUR-Lex/CELLAR dla UE) — zwraca tylko ten
     artykuł, nie cały akt, z NAJNOWSZEGO tekstu jednolitego.
@@ -38,8 +38,15 @@ async def verify_article(citation: str) -> str:
     pola — nie nazywaj odczytu PDF tekstem urzędowym. Przy wątpliwości
     narzędzie ODMAWIA zamiast podać starsze brzmienie.
     Format: 'art. N [ust. M] KOD'. Przykłady: 'art. 45 u.k.k.',
-    'art. 385¹ KC', 'art. 18[3d] KP', 'art. 28 ust. 3 RODO'. Kody: list_acts()."""
+    'art. 385¹ KC', 'art. 18[3d] KP', 'art. 28 ust. 3 RODO'. Kody: list_acts().
+    na_dzien (RRRR-MM-DD, tylko akty PL): brzmienie obowiązujące w tym dniu —
+    z tekstu jednolitego sprzed tego dnia i kolejnego, z wykazem nowelizacji;
+    „Ustalenie:” mówi, czy brzmienie jest potwierdzone, ustalone z treści
+    nowelizacji, czy nieustalone (wtedy oba brzmienia). Także data przyszła."""
     try:
+        if na_dzien:
+            from legal_cite import na_dzien as nd
+            return await nd.verify_article_na_dzien(citation, na_dzien)
         return await core.verify_article(citation)
     except Exception as e:
         logger.warning("verify_article blad=%s", type(e).__name__)
