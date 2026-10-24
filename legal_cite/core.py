@@ -52,6 +52,11 @@ PL_ACTS: dict[str, dict] = {
     "u.k.w.h.": dict(pub="DU", year=1982, pos=147,  name="Ustawa o księgach wieczystych i hipotece"),
     "u.c.":     dict(pub="DU", year=2013, pos=1650, name="Ustawa o cudzoziemcach"),
     "ustawy o cudzoziemcach": dict(pub="DU", year=2013, pos=1650, name="Ustawa o cudzoziemcach"),
+    # nabywanie nieruchomości przez cudzoziemców: akt pierwotny Dz.U. 1920 nr 31 poz. 178 (ELI DU/1920/178),
+    # t.j. Dz.U. 2017 poz. 2278 (HTML); nowela Dz.U. 2026 poz. 1099 w życie 19.11.2026 (sprawdzone w ELI 2026-10-24)
+    "UNNC":     dict(pub="DU", year=1920, pos=178,  name="Ustawa o nabywaniu nieruchomości przez cudzoziemców"),
+    "u.n.n.c.": dict(pub="DU", year=1920, pos=178,  name="Ustawa o nabywaniu nieruchomości przez cudzoziemców"),
+    "ustawy o nabywaniu nieruchomości przez cudzoziemców": dict(pub="DU", year=1920, pos=178, name="Ustawa o nabywaniu nieruchomości przez cudzoziemców"),
     "KW":      dict(pub="DU", year=1971, pos=114,  name="Kodeks wykroczeń"),
     "KPK":      dict(pub="DU", year=1997, pos=555,  name="Kodeks postępowania karnego"),
     "KKS":      dict(pub="DU", year=1999, pos=930,  name="Kodeks karny skarbowy"),
@@ -509,7 +514,9 @@ def _cut_ustep(art_text: str, ustep: str) -> str | None:
               rf'|{re.escape(sup)})\s?\.\s')
     else:
         nr = rf'{re.escape(baza)}\.\s'
-    m = re.search(rf'(?:§\s*)?(?<![\d\w])(?<!\d\s){nr}', art_text)
+    # „(?<!Art\.\s)”: nagłówek „Art. 1.” nie jest ustępem 1 — bez tego „art. 1 ust. 1” aktu
+    # o numeracji „Art. 1. 1. Nabycie…” (u.n.n.c.) oddawał samo „1.” (granica = następny ustęp)
+    m = re.search(rf'(?:§\s*)?(?<![\d\w])(?<!\d\s)(?<!Art\.\s){nr}', art_text)
     if not m:
         return None
     ust_start = m.start()
