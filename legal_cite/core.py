@@ -175,17 +175,22 @@ def parse_citation(raw: str) -> dict | None:
 def _art_regex(raw_art: str) -> str:
     """Buduje fragment regex dopasowujący numer artykułu w tekście źródła,
     tolerancyjnie na spacje. 385¹→'385\\s+1' (źródło: „Art. 385 1 ."),
-    36a→'36\\s*a', 59aa→'59\\s*aa', 45→'45'."""
-    s = re.sub(r'([¹²³⁴⁵⁶⁷⁸⁹⁰]+)', lambda mm: ' ' + mm.group(1).translate(_SUP), raw_art.strip())
-    s = re.sub(r'\s*[\[\(\^]\s*(\d+)\s*[\]\)]?', r' \1', s)  # [1]/(1)/^1 → " 1"
-    s = re.sub(r'\s+', ' ', s).strip()
-    parts = s.split(' ')
-    if len(parts) == 2 and parts[1].isdigit():               # baza + indeks górny
-        return rf'{re.escape(parts[0])}\s+{re.escape(parts[1])}'
-    mlet = re.match(r'^(\d+)([a-zA-Z]+)$', parts[0])
-    if mlet:                                                  # sufiks literowy 36a, 59aa
-        return rf'{mlet.group(1)}\s*{mlet.group(2)}'
-    return re.escape(parts[0])
+    36a→'36\\s*a', 59aa→'59\\s*aa', 45→'45', 131¹ᵃ/131[1a]→'131\\s+1\\s*a'.
+
+    Indeks z literą musi zostać w wzorcu: wcześniej „131[1a]” dawało samo
+    '131', więc ścieżka zapasowa oddawała art. 131 jako art. 131¹ᵃ — w trybie
+    na_dzien przy t.j. sprzed dodania jednostki (#11). Numer, którego nie da
+    się rozpoznać, daje wzorzec niedopasowujący niczego zamiast gołej bazy."""
+    s = _indeks_na_nawias(raw_art.strip())                    # 131¹ᵃ → 131[1a]
+    s = re.sub(r'\s*[\(\^]\s*(\d+[a-z]*)\s*\)?', r'[\1]', s)   # 131(1a) / 131^1 → 131[1a]
+    s = re.sub(r'\s+', '', s).lower()
+    m = re.fullmatch(r'(\d+)([a-z]*)(?:\[(\d+)([a-z]*)\])?', s)
+    if not m:
+        return r'(?!)'
+    baza = m.group(1) + (rf'\s*{m.group(2)}' if m.group(2) else '')
+    if not m.group(3):
+        return baza
+    return baza + rf'\s+{m.group(3)}' + (rf'\s*{m.group(4)}' if m.group(4) else '')
 
 
 def _strip_html(raw_html: str) -> str:
@@ -749,7 +754,7 @@ def _jeszcze_nie(mapa: dict[str, str], nr: str | None,
 def _kanon_art(raw_art: str) -> str | None:
     """Numer artykułu w zapisie, jakim posługuje się źródło w data-id:
     385¹/385[1]/385(1) → '385_1', 36a → '36a', 59aa → '59aa', 45 → '45'."""
-    s = re.sub(r'\s+', '', raw_art.strip())
+    s = re.sub(r'\s+', '', _indeks_na_nawias(raw_art.strip()))  # 131¹ᵃ → 131[1a]
     s = re.sub(r'([¹²³⁴⁵⁶⁷⁸⁹⁰]+)', lambda m: '_' + m.group(1).translate(_SUP), s)
     s = re.sub(r'[\[\(\^]\s*(\d+[a-z]*)\s*[\]\)]?', r'_\1', s).lower()
     return s if re.fullmatch(r'\d+[a-ząćęłńóśźż]*(?:_\d+[a-ząćęłńóśźż]*)*', s) else None
@@ -898,7 +903,10 @@ def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | 
         przyszle = _jeszcze_nie(mapa, _wlasny_odnosnik_html(fragment, 0, len(fragment)), dzis)
         uwagi: list[str] = []
         fragment = _wybierz_podjednostki_html(fragment, mapa, dzis, uwagi)
-        num = m.group(2).lower()
+        # „arti_131_1_a” (t.j. 2024) i „arti_131_1a” to ten sam art. 131¹ᵃ — klucz jak
+        # w _kanon_art; inaczej artykuł z literą w indeksie szedł ścieżką zapasową,
+        # która nie sprawdza dat wejścia w życie (#11)
+        num = re.sub(r'_(\d+)_([a-z]+)$', r'_\1\2', m.group(2).lower())
         ktore = sum(1 for n, *_ in out if n == num)
         if uwagi:
             _uwagi_jedn[(key, num, ktore)] = uwagi
