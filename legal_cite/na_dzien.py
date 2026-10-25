@@ -240,6 +240,8 @@ def _rozdzial(raw_html: str, art: str) -> str | None:
     """Numer rozdziału, w którym stoi artykuł (wg znaczników HTML tekstu)."""
     klucz = core._kanon_art(art)
     poz = raw_html.find(f'data-id="arti_{klucz}"') if klucz else -1
+    if poz < 0 and klucz and re.search(r'_\d+[a-z]+$', klucz):  # t.j. 2024: „arti_131_1_a”
+        poz = raw_html.find('data-id="arti_' + re.sub(r'_(\d+)([a-z]+)$', r'_\1_\2', klucz) + '"')
     if poz < 0 and klucz and klucz.isdigit():  # artykuł bez własnego znacznika: nagłówek w tekście
         m = re.search(rf'Art\.(?:\s|&nbsp;)*{klucz}\s*\.', raw_html)
         poz = m.start() if m else -1

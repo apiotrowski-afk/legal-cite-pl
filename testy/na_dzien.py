@@ -32,6 +32,9 @@ PRZYPADKI = [
     ("art. 118 KC", "2015-01-01", ["lat dziesięć"], ["sześć lat"], USTAL),
     ("art. 118 KC", "2020-01-01", ["sześć lat"], ["lat dziesięć"], POTW),
     ("art. 117¹ KC", "2018-01-01", ["nie istniał"], ["konsument"], USTAL),
+    # #11: indeks z literą — wcześniej ścieżka zapasowa oddawała art. 131 („operatora pocztowego”)
+    ("art. 131¹ᵃ k.p.c.", "2021-01-01", ["nie istniał"], ["operatora pocztowego"], USTAL),
+    ("art. 131[1a] § 1 KPC", "2024-10-01", ["niemożności doręczenia"], ["operatora pocztowego"], USTAL),
     ("art. 117¹ KC", "2019-01-01", ["konsument"], ["nie istniał"], USTAL),
     ("art. 646 KC", "2020-01-01", ["lat dwóch"], [], POTW),
     ("art. 36 § 1 KP", "2015-06-01", ["czas nieokreślony jest uzależniony"], ["zawartej na czas określony jest"], USTAL),

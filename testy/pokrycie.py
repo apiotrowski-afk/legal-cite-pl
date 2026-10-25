@@ -89,7 +89,18 @@ async def main():
             if not art:
                 w['pominiete'] += 1
                 continue
-            got = core.extract_pl_article_html(key, raw, art, None)
+            # jednostka wydrukowana z wyprzedzeniem (k.p.k. art. 100a, 100b, 131a —
+            # w życie 2028–2029) i brzmienie, którego nie da się wybrać z odnośników,
+            # to poprawne odmowy narzędzia, nie awaria testu (#12)
+            try:
+                got = core.extract_pl_article_html(key, raw, art, None)
+            except core.JeszczeNieObowiazuje:
+                w['oczekujace'] += 1
+                continue
+            except core.Niejednoznaczne:
+                w['niejednoznaczne'] += 1
+                bledy.append(('NIEJEDNOZNACZNE', art, norm(brzmienia[0])[:70]))
+                continue
             if got is None:
                 got = core.extract_pl_article(text, art, None)
             if got:
@@ -112,7 +123,8 @@ async def main():
         sumy.update(w)
         raport.append((kod, info['name'], dict(w), bledy))
         print(f"{kod:12s} ok={w['ok']:5d} ZLE={w['zle']:4d} ODMOWA={w['odmowa']:4d} "
-              f"pom.={w['pominiete']:4d}", flush=True)
+              f"pom.={w['pominiete']:4d} oczek.={w['oczekujace']:3d} niejedn.={w['niejednoznaczne']:3d}",
+              flush=True)
 
     print('\n=== SUMA', dict(sumy))
     print('\n--- artykuły o kilku brzmieniach (wybór = indeks brzmienia, daty wejścia w życie):')
