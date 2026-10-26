@@ -119,6 +119,11 @@ def _rozdziel_indeksy(s: str) -> str:
 
 _PRZYPIS_RE = re.compile(r"\[\^([^\]\s]+)\]")
 _NOTKA_RE = re.compile(r"[⁰¹²³⁴⁵⁶⁷⁸⁹]+⁾")
+# etykieta odnośnika redakcyjnego „I)” (t.j.: „1)I) Niniejsza ustawa…”, „I) Odnośnik dodany
+# przez…”): pdftotext wypisuje ją osobno, a jako słowo „i” nie była pomijana przy porównaniu
+# z warstwą — odmowa dla artykułów ze strony z tym odnośnikiem (O.p. art. 3; #6, propozycja
+# @PolskiAgentW: 491 t.j. 2025–2026 bez HTML, odmów 341 → 313, nowych 0)
+_RZYMSKA_ETYKIETA_RE = re.compile(r"(?<![\w(])[IVX]+\)")
 _SLOWO_RE = re.compile(r"\x01?[^\W_]+", re.UNICODE)
 _LITERA_CYFRA_RE = re.compile(r"(?<=[^\W\d_])(?=\d)", re.UNICODE)
 
@@ -130,6 +135,7 @@ def tokeny(s: str, opcjonalne: bool = False) -> list[str]:
     górnego zaczynają się znacznikiem OPC."""
     s = _PRZYPIS_RE.sub(" ", s)
     s = _NOTKA_RE.sub(" ", s)
+    s = _RZYMSKA_ETYKIETA_RE.sub(" ", s)
     s = _rozdziel_indeksy(s)
     s = unicodedata.normalize("NFKC", s).lower()
     s = _LITERA_CYFRA_RE.sub(" ", s)
@@ -292,7 +298,7 @@ def jednostki_md(md: str, przypisy: dict[str, str],
     dozwolone — stoi obok pierwszego). dzis — dzień, na który wybierane są
     obowiązujące brzmienia (domyślnie dzisiejszy)."""
     from eli2md.tree import md_to_tree
-    from legal_cite.core import _data_wejscia
+    from legal_cite.core import _data_wejscia, _zdania_dwa_brzmienia
 
     drzewo = md_to_tree(md)
     # Tekst jednolity jest załącznikiem do obwieszczenia Marszałka Sejmu, więc
@@ -323,6 +329,10 @@ def jednostki_md(md: str, przypisy: dict[str, str],
         # (art. 860 k.c.: „Dodany…” przy § 3 nie datuje całego artykułu)
         wlasny = _wlasny_odnosnik(node)
         data = _data_wejscia(przypisy, wlasny) if wlasny else None
+        zdania = _zdania_dwa_brzmienia(przypisy, odn)  # art. 505 k.p.k. (#13)
+        if zdania:
+            wyb["niejednoznaczne"] = True
+            wyb["uwagi"] += zdania
         out.append(Jednostka(num, klucz, tekst, odn, data, pelny=pelny,
                              uwagi=wyb["uwagi"], niejednoznaczne=wyb["niejednoznaczne"],
                              wlasny_odnosnik=wlasny))

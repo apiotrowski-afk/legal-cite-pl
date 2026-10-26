@@ -692,6 +692,30 @@ def _odnosniki(key: str, raw_html: str) -> dict[str, str]:
     return mapa
 
 
+# Odnośnik przy ZDANIU, nie przy jednostce: „Zdanie pierwsze w tym brzmieniu obowiązuje
+# do wejścia w życie zmiany, o której mowa w odnośniku 6.” — t.j. drukuje wtedy oba
+# brzmienia zdania jedno po drugim w tym samym paragrafie (art. 505 k.p.k., Dz.U. 2026
+# poz. 490: „Odpis wyroku…” i „Kopię wyroku…”, nowe od 1.10.2029). Wybór brzmienia działa
+# na poziomie jednostek, nie zdań, więc taki tekst byłby oddany sklejony (#13).
+_ZDANIE_DO_ZMIANY_RE = re.compile(
+    r'(?i)^\s*zdani\w*\s+(\w+)\b.*?\bw tym brzmieniu obowiązuj\w*\s+do\s+(?:dnia\s+)?wejścia'
+    r'.*?odnośniku\s+(\d+)')
+
+
+def _zdania_dwa_brzmienia(mapa: dict[str, str], numery: list[str]) -> list[str]:
+    """Opisy zdań wydrukowanych w dwóch brzmieniach (puste, gdy takich nie ma)."""
+    out = []
+    for nr in dict.fromkeys(numery):
+        m = _ZDANIE_DO_ZMIANY_RE.search(mapa.get(nr) or "")
+        if not m:
+            continue
+        d = _data_wejscia(mapa, m.group(2))
+        out.append(f"zdanie {m.group(1)} wydrukowane w dwóch brzmieniach (odnośniki {nr} i "
+                   f"{m.group(2)}; nowe " + (f"od {d:%d.%m.%Y}" if d else "z datą nieodczytaną")
+                   + ") — narzędzie nie wybiera brzmienia zdania")
+    return out
+
+
 def _data_wejscia(mapa: dict[str, str], nr: str, krok: int = 0) -> _dt.date | None:
     """Data, od której obowiązuje brzmienie opisane odnośnikiem nr.
 
@@ -903,6 +927,9 @@ def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | 
         przyszle = _jeszcze_nie(mapa, _wlasny_odnosnik_html(fragment, 0, len(fragment)), dzis)
         uwagi: list[str] = []
         fragment = _wybierz_podjednostki_html(fragment, mapa, dzis, uwagi)
+        zdania = _zdania_dwa_brzmienia(mapa, _PIERWSZY_ODNOSNIK_RE.findall(fragment))
+        if zdania:
+            uwagi += [NIEJEDNOZNACZNE] + zdania
         # „arti_131_1_a” (t.j. 2024) i „arti_131_1a” to ten sam art. 131¹ᵃ — klucz jak
         # w _kanon_art; inaczej artykuł z literą w indeksie szedł ścieżką zapasową,
         # która nie sprawdza dat wejścia w życie (#11)
