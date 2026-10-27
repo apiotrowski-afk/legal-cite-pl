@@ -50,6 +50,8 @@ PL_ACTS: dict[str, dict] = {
     # Konstytucji celowo nie ma: ELI ma tylko PDF pierwotny z 1997 r. (bez zmian
     # z 2006 i 2009), a jego warstwa tekstowa nie przechodzi kontroli odczytu.
     "u.k.w.h.": dict(pub="DU", year=1982, pos=147,  name="Ustawa o księgach wieczystych i hipotece"),
+    "u.m.w.p.": dict(pub="DU", year=2002, pos=1679, name="Ustawa o minimalnym wynagrodzeniu za pracę"),
+    "ustawy o minimalnym wynagrodzeniu za pracę": dict(pub="DU", year=2002, pos=1679, name="Ustawa o minimalnym wynagrodzeniu za pracę"),
     "u.c.":     dict(pub="DU", year=2013, pos=1650, name="Ustawa o cudzoziemcach"),
     "ustawy o cudzoziemcach": dict(pub="DU", year=2013, pos=1650, name="Ustawa o cudzoziemcach"),
     # nabywanie nieruchomości przez cudzoziemców: akt pierwotny Dz.U. 1920 nr 31 poz. 178 (ELI DU/1920/178),
@@ -1200,6 +1202,11 @@ async def _odpowiedz_pl(info: dict, art: str, ustep: str | None, ref: str) -> st
     if not tj:
         return f"❌ Nie udało się pobrać metadanych {info['name']} z api.sejm.gov.pl"
     najnowszy = tj[0]
+    if najnowszy.get("html_awaria") and najnowszy["meta"].get("textPDF"):
+        # Awaria HTML ELI (wszystkie text.html → 500, np. 26.10.2026), a ten sam t.j.
+        # jest w PDF: odczyt PDF z kontrolą warstwy tekstowej, z jawną adnotacją,
+        # zamiast odmowy dla całego aktu.
+        return await _odpowiedz_pdf(info, tj, art, ustep, ref)
     if najnowszy.get("html_awaria"):
         return (f"❌ {ref} {info['name']}: API ELI Sejmu nie oddaje teraz tekstu HTML "
                 f"najnowszego tekstu jednolitego ({najnowszy['id']}) — awaria po stronie "
@@ -1313,6 +1320,7 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
 
     # kontrola 1: starszy urzędowy HTML
     rel = pdf_tj.porownaj_z_html(jedn, html_teksty)
+    awaria_html = False
     zmieniajace = najnowszy.get("zmieniajace") or []
     # kontrola 2: warstwa tekstowa PDF drugim czytnikiem
     if od.raw_tok:
@@ -1352,17 +1360,19 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
                                    starszy_id)
             opis_html = f"różne od t.j. {starszy_id} (HTML); {wyjasnienie}"
         else:
-            awaria_html = any(w.get("html_awaria") for w in tj)
-            if awaria_html and not starszy_id:
-                return _odmowa_pdf(info, ref, ident, adres, url_pdf,
-                                   "API ELI nie oddaje teraz starszego t.j. w HTML (awaria "
-                                   "api.sejm.gov.pl), więc nie da się wykonać porównania",
-                                   None)
-            opis_html = (f"artykułu nie ma w t.j. {starszy_id} (HTML) — dodany później"
+            awaria_html = any(w.get("html_awaria") for w in tj) and not starszy_id
+            # Tryb awaryjny (decyzja 27.10.2026): przy awarii HTML ELI porównania ze
+            # starszym t.j. nie da się wykonać, ale kontrola warstwy tekstowej PDF
+            # (zaliczona — inaczej odmowa wyżej) zostaje; wynik jawnie oznaczony.
+            opis_html = ("NIEWYKONANE — API ELI nie oddaje teraz HTML (awaria "
+                         "api.sejm.gov.pl); odczyt potwierdzony tylko warstwą tekstową PDF"
+                         if awaria_html else
+                         f"artykułu nie ma w t.j. {starszy_id} (HTML) — dodany później"
                          if starszy_id else "brak starszego t.j. w HTML do porównania")
         tekst, ile = pdf_tj.napraw_sklejki(jedn.czysty(), slownik)
         zrodlo = "nieurzedowy_odczyt_pdf"
-        wiernosc = "zaliczona_pdftotext"
+        wiernosc = ("zaliczona_pdftotext_bez_porownania_html_awaria_eli"
+                    if awaria_html else "zaliczona_pdftotext")
         naglowek = (f"(źródło: api.sejm.gov.pl, t.j. {adres} z {od.data_tj} — tylko PDF)\n"
                     f"⚠ NIEURZĘDOWY ODCZYT z urzędowego PDF: {od.konwerter}; "
                     f"PDF sha256 {od.sha256[:16]}…; wiążący jest PDF: {url_pdf}\n"
