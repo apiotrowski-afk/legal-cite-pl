@@ -676,6 +676,8 @@ def _koniec_div(raw_html: str, start: int) -> int:
 _ODNOSNIK_RE = re.compile(
     r'<a\b[^>]*class="[^"]*gloss-link[^"]*"[^>]*>\s*<sup>\s*(\d+)\s*\)\s*</sup>'
     r'\s*<span class="tooltip-text">(.*?)</span>\s*</a>', re.IGNORECASE | re.DOTALL)
+# numer odnośnika w <sup> — z dymkiem (w <a class="gloss-link">) albo goły
+_SUP_NR_RE = re.compile(r'<sup>\s*(\d+)\s*\)\s*</sup>', re.IGNORECASE)
 _PIERWSZY_ODNOSNIK_RE = re.compile(
     r'<a\b[^>]*class="[^"]*gloss-link[^"]*"[^>]*>\s*<sup>\s*(\d+)\s*\)\s*</sup>',
     re.IGNORECASE)
@@ -713,27 +715,37 @@ _ZDANIE_DO_ZMIANY_RE = re.compile(
 
 def _wybierz_zdania_html(fragment: str, mapa: dict[str, str], dzis: _dt.date,
                         uwagi: list[str]) -> tuple[str, set[str]]:
-    """Jak pdf_tj._wybierz_zdania, na HTML ELI: nowe brzmienie zdania (od końca
+    """Jak pdf_tj._wybierz_zdania, na HTML ELI: nowe brzmienie zdania (od początku
     odnośnika A do końca odnośnika B) wycinane, gdy jeszcze nie obowiązuje.
+    Odnośnik B bywa gołym „<SUP>157)</SUP>” bez dymka — źródło linkuje treść
+    przypisu tylko przy pierwszym użyciu (art. 505 k.p.k., t.j. 2024/37).
     Zwraca fragment i numery rozstrzygniętych odnośników A."""
     ok: set[str] = set()
+    zamkniecie = re.compile(r'</a\s*>', re.IGNORECASE)
     for m in list(_PIERWSZY_ODNOSNIK_RE.finditer(fragment))[::-1]:
         z = _ZDANIE_DO_ZMIANY_RE.search(mapa.get(m.group(1)) or "")
         if not z:
             continue
-        nast = _PIERWSZY_ODNOSNIK_RE.search(fragment, m.end())
+        koniec_a = zamkniecie.search(fragment, m.end())
+        if not koniec_a:
+            continue
+        nast = _SUP_NR_RE.search(fragment, koniec_a.end())  # następny odnośnik: z dymkiem albo goły
         if not nast or nast.group(1) != z.group(2):
             continue
         d = _data_wejscia(mapa, z.group(2))
         if d is None or d <= dzis:
             continue
-        # Odnośnik ELI to <a class="gloss-link"><sup>N)</sup><span tooltip>…</span></A>,
+        # Odnośnik ELI z dymkiem to <a class="gloss-link"><sup>N)</sup><span tooltip>…</span></A>,
         # a _strip_html usuwa go w całości do najbliższego </a> — cięcie w środku odnośnika
         # zjadało obowiązującą treść za nim (przegląd Astry, 28.10.2026).
-        koniec = re.compile(r'</a\s*>', re.IGNORECASE).search(fragment, nast.end())
-        if not koniec:
-            continue
-        fragment = fragment[:m.start()] + " " + fragment[koniec.end():]
+        if re.search(r'<a\b[^>]*>\s*$', fragment[:nast.start()], re.IGNORECASE):
+            koniec = zamkniecie.search(fragment, nast.end())
+            if not koniec:
+                continue
+            kon = koniec.end()
+        else:
+            kon = nast.end()
+        fragment = fragment[:m.start()] + " " + fragment[kon:]
         ok.add(m.group(1))
         uwagi.append(f"⚠ Zdanie {z.group(1)}: tekst jednolity drukuje dwa brzmienia; powyżej "
                      f"obowiązujące, nowe wchodzi w życie {d:%d.%m.%Y}.")

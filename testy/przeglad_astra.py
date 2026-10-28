@@ -41,6 +41,13 @@ t = core._strip_html(frag)
 sprawdz("Stare zdanie." in t and "Obowiązujący tekst dalej." in t and "Koniec akapitu." in t
         and "Nowe zdanie" not in t, f"1. HTML: obowiązująca treść za odnośnikiem zostaje: {t!r}")
 
+# 1b: odnośnik B jako goły „<SUP>157)</SUP>” bez dymka (art. 505 k.p.k., t.j. 2024/37)
+H2 = (f"<p>Stare zdanie.{a(5)}<B CLASS=\"b\">Nowe zdanie. </B><SUP>6)</SUP></p><p>Dalej.</p>")
+frag, ok_ = core._wybierz_zdania_html(H2, MAPA, datetime.date(2026, 10, 28), [])
+t = core._strip_html(frag)
+sprawdz("Stare zdanie." in t and "Nowe zdanie" not in t and "Dalej." in t and ok_ == {"5"},
+        f"1b. goły <SUP> jako odnośnik B: {t!r}")
+
 # 2
 sprawdz("i" in pdf_tj.tokeny("wymogi (załącznik I) rozporządzenia"), "2. „załącznik I)” — liczba rzymska w treści zostaje")
 sprawdz("i" not in pdf_tj.tokeny("1)I) Niniejsza ustawa"), "2. „1)I)” — etykieta odnośnika pomijana")
