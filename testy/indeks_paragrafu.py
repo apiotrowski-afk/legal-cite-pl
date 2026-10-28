@@ -54,5 +54,15 @@ for tekst, ust, oczek in WYCINANIE:
     w = core._cut_ustep(tekst, ust)
     sprawdz(w == oczek, f"wycinanie {ust!r}: {w!r}")
 
+# odesłanie kończące zdanie („w ust. 2 i 3.”) nie jest granicą ani początkiem ustępu
+K = ("Art. 55. 1. Ekstradycja jest zakazana, z wyjątkiem przypadków określonych w ust. 2 i 3. "
+     "2. Ekstradycja może być dokonana. 3. Ekstradycja jest wykluczona.")
+for ust, oczek in [("1", "1. Ekstradycja jest zakazana, z wyjątkiem przypadków określonych w ust. 2 i 3."),
+                   ("3", "3. Ekstradycja jest wykluczona.")]:
+    w = core._cut_ustep(K, ust)
+    sprawdz(w == oczek, f"odesłanie „ust. 2 i 3.”: ust. {ust} → {w!r}")
+UE = "Artykuł 28 Podmiot przetwarzający 1. Jeżeli przetwarzanie ma być dokonywane. 2. Podmiot nie korzysta."
+sprawdz(core._cut_ustep(UE, "1") == "1. Jeżeli przetwarzanie ma być dokonywane.", "UE: ust. 1 zaraz po tytule artykułu")
+
 print("wszystko OK" if not bledy else f"{bledy} błędów")
 sys.exit(1 if bledy else 0)

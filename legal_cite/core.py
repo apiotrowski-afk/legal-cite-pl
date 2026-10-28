@@ -47,8 +47,13 @@ PL_ACTS: dict[str, dict] = {
     "u.k.s.c.": dict(pub="DU", year=2005, pos=1398, name="Ustawa o kosztach sądowych w sprawach cywilnych"),
     "UKSC":     dict(pub="DU", year=2005, pos=1398, name="Ustawa o kosztach sądowych w sprawach cywilnych"),
     # księgi wieczyste, karne i administracyjne (pozycje sprawdzone w ELI 2026-10-18).
-    # Konstytucji celowo nie ma: ELI ma tylko PDF pierwotny z 1997 r. (bez zmian
-    # z 2006 i 2009), a jego warstwa tekstowa nie przechodzi kontroli odczytu.
+    # Konstytucja: tekstu jednolitego w Dz.U. nie ma, PDF pierwotny z 1997 r. nie ma zmian
+    # z 2006 i 2009 — źródłem jest tekst ujednolicony Kancelarii Sejmu z ELI (plik typu „U”),
+    # nieurzędowy, z kontrolą warstwy tekstowej i sprawdzeniem, że obejmuje akty zmieniające.
+    "Konstytucja": dict(pub="DU", year=1997, pos=483, name="Konstytucja Rzeczypospolitej Polskiej", tekst_u="D19970483Lj.pdf"),
+    "Konstytucji": dict(pub="DU", year=1997, pos=483, name="Konstytucja Rzeczypospolitej Polskiej", tekst_u="D19970483Lj.pdf"),
+    "Konstytucja RP": dict(pub="DU", year=1997, pos=483, name="Konstytucja Rzeczypospolitej Polskiej", tekst_u="D19970483Lj.pdf"),
+    "Konstytucji RP": dict(pub="DU", year=1997, pos=483, name="Konstytucja Rzeczypospolitej Polskiej", tekst_u="D19970483Lj.pdf"),
     "u.k.w.h.": dict(pub="DU", year=1982, pos=147,  name="Ustawa o księgach wieczystych i hipotece"),
     "u.m.w.p.": dict(pub="DU", year=2002, pos=1679, name="Ustawa o minimalnym wynagrodzeniu za pracę"),
     # AML (sprawdzone w ELI 2026-10-28)
@@ -506,8 +511,12 @@ async def _fetch_eu(info: dict) -> str | None:
 # „§ 1[1].”, rzadziej wprost „§ 1¹.”. Lookbehind (?<!\d\s) nie pozwala wziąć
 # samego indeksu („1.” w „§ 1 1.”) za początek jednostki.
 _IDX_SUP = "[¹²³⁴⁵⁶⁷⁸⁹⁰ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ]+"
+# Jednostka zaczyna się na początku tekstu albo po znaku kończącym zdanie lub punkt
+# („. ”, „; ”, „: ”, „) ”) — „3.” w odesłaniu „w ust. 2 i 3.” to nie ustęp 3 (Konstytucja
+# art. 55 ust. 1 urywał się na „w ust. 2 i”; zapytanie o ust. 3 mogło zacząć się w odesłaniu).
+_POCZATEK_JEDN = r'(?:^|(?<=[.;:)\]”"]\s))'
 _JEDN_USTEP_RE = re.compile(
-    rf'(?:§\s*)?(?<![\d\w])(?<!\d\s)\d+[a-z]{{0,2}}'
+    rf'{_POCZATEK_JEDN}(?:§\s*)?(?<![\d\w])(?<!\d\s)\d+[a-z]{{0,2}}'
     rf'(?:\s+\d+[a-z]?(?=\s?\.\s)|\s*\[\d+[a-z]?\]|{_IDX_SUP})?\s?\.\s')
 
 
@@ -528,7 +537,11 @@ def _cut_ustep(art_text: str, ustep: str) -> str | None:
         nr = rf'{re.escape(baza)}\.\s'
     # „(?<!Art\.\s)”: nagłówek „Art. 1.” nie jest ustępem 1 — bez tego „art. 1 ust. 1” aktu
     # o numeracji „Art. 1. 1. Nabycie…” (u.n.n.c.) oddawał samo „1.” (granica = następny ustęp)
-    m = re.search(rf'(?:§\s*)?(?<![\d\w])(?<!\d\s)(?<!Art\.\s){nr}', art_text)
+    m = re.search(rf'{_POCZATEK_JEDN}(?:§\s*)?(?<![\d\w])(?<!\d\s)(?<!Art\.\s){nr}', art_text)
+    if not m and baza == "1" and not idx:
+        # ust. 1 aktu UE stoi zaraz po tytule artykułu („Artykuł 28 Podmiot
+        # przetwarzający 1. Jeżeli…”), bez znaku przestankowego przed numerem
+        m = re.search(rf'(?:§\s*)?(?<![\d\w])(?<!\d\s)(?<!Art\.\s){nr}', art_text)
     if not m:
         return None
     ust_start = m.start()
@@ -1242,12 +1255,69 @@ def _wybierz_brzmienie(trafienia: list, dzis: _dt.date) -> tuple[int, bool]:
     return wybor, nieznane
 
 
+async def _odpowiedz_tekst_u(info: dict, art: str, ustep: str | None, ref: str) -> str:
+    """Akt bez tekstu jednolitego w Dz.U., z tekstem ujednoliconym Kancelarii Sejmu
+    w ELI (Konstytucja). Tekst nieurzędowy: kontrola warstwy tekstowej PDF i sprawdzenie,
+    że podstawa opracowania (nagłówek PDF) wymienia każdy akt zmieniający z ELI."""
+    from legal_cite import pdf_tj
+    ident = f"{info['pub']}/{info['year']}/{info['pos']}"
+    url_pdf = f"https://api.sejm.gov.pl/eli/acts/{ident}/text/U/{info['tekst_u']}"
+    if not pdf_tj.konwerter_dostepny():
+        return f"❌ {ref} {info['name']}: konwerter eli2md nie jest zainstalowany po stronie serwera"
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30, headers=_HEADERS) as c:
+        meta = (await c.get(f"https://api.sejm.gov.pl/eli/acts/{ident}")).json()
+    try:
+        od = await pdf_tj.odczyt(ident, meta, plik_u=info["tekst_u"])
+    except Exception as e:  # sieć, uszkodzony PDF, błąd konwertera
+        logger.warning("odczyt tekstu U %s blad=%s", ident, type(e).__name__)
+        return (f"❌ {ref} {info['name']}: nie udało się pobrać lub skonwertować tekstu "
+                f"ujednoliconego ({type(e).__name__}). Sprawdź: {url_pdf}")
+    klucz = _kanon_art(art)
+    trafienia = od.znajdz(klucz) if klucz else []
+    if not trafienia:
+        return f"❌ {ref} nie znaleziony w {info['name']}. Sprawdź numer artykułu."
+    jedn = trafienia[0]
+    w = pdf_tj.wiernosc_pdftotext(jedn, od.raw_tok, od.wyjasnienia) if od.raw_tok else None
+    if w is None or not w.ok:
+        return (f"❌ {ref} {info['name']}: odczyt tekstu ujednoliconego nie przeszedł kontroli "
+                f"warstwy tekstowej PDF ({w.powod if w else 'brak pdftotext'}). Sprawdź: {url_pdf}")
+    tekst = jedn.czysty()
+    if ustep:
+        tekst = _cut_ustep(tekst, ustep)
+        if not tekst:
+            return f"❌ {ref} nie znaleziony w {info['name']}. Sprawdź numer ustępu."
+    zmieniajace = sorted(((e.get("id") or "?", e.get("date") or "")
+                          for e in (meta.get("references") or {}).get("Akty zmieniające", [])),
+                         key=lambda x: (x[1], x[0]))
+    podstawa = od.raw_tok[:400]  # nagłówek „Opracowano na podstawie: Dz. U. … poz. …”
+    brak = [i for i, _ in zmieniajace if i.split("/")[-1] not in podstawa]
+    lista = ", ".join(f"{_adres_dz_u(i)} ({_data_pl(d)})" for i, d in zmieniajace) or "brak"
+    if brak:
+        aktualnosc = (f"nieustalona — podstawa opracowania tekstu ujednoliconego nie wymienia: "
+                      f"{', '.join(_adres_dz_u(i) for i in brak)}")
+        kod = "nieustalona_akt_zmieniajacy_poza_tekstem_ujednoliconym"
+    else:
+        aktualnosc = (f"wg wykazu API ELI akty zmieniające ({lista}) są uwzględnione w podstawie "
+                      f"opracowania tekstu ujednoliconego")
+        kod = "potwierdzona_wg_wykazu_eli"
+    return (f"📄 **{info['name']}**, {ref}\n"
+            f"(źródło: api.sejm.gov.pl, tekst ujednolicony Kancelarii Sejmu — NIEURZĘDOWY; "
+            f"wiążący jest tekst w Dz.U. 1997 nr 78 poz. 483 i aktach zmieniających; "
+            f"odczyt {od.konwerter}, kontrola pdftotext: zaliczona; PDF: {url_pdf})\n"
+            f"Aktualność: {aktualnosc}\n\n{tekst}\n\n"
+            f"[dla modelu] zrodlo=tekst_ujednolicony_kancelarii_sejmu; aktualnosc={kod}; "
+            f"cytuj_jako=„{info['name']}, tekst ujednolicony Kancelarii Sejmu (nieurzędowy)”; "
+            f"nie_nazywaj_tekstem_urzedowym=tak")
+
+
 async def _odpowiedz_pl(info: dict, art: str, ustep: str | None, ref: str) -> str:
     """Brzmienie przepisu PL. Najpierw WERSJA, potem format: podstawą jest
     najnowszy tekst jednolity. Gdy API daje go w HTML — ścieżka urzędowego
     HTML. Gdy tylko w PDF — nieurzędowy odczyt PDF z kontrolami (pdf_tj).
     Starszy HTML sam w sobie nie jest odpowiedzią na pytanie o aktualne
     brzmienie, więc przy odmowie nie jest podawany."""
+    if info.get("tekst_u"):
+        return await _odpowiedz_tekst_u(info, art, ustep, ref)
     tj = await _teksty_jednolite(info)
     if not tj:
         return f"❌ Nie udało się pobrać metadanych {info['name']} z api.sejm.gov.pl"

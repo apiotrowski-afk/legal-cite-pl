@@ -728,19 +728,24 @@ def _warstwa(pdf_path: pathlib.Path, txt_path: pathlib.Path) -> str | None:
     return txt_path.read_text(encoding="utf-8")
 
 
-async def odczyt(ident: str, meta_tj: dict | None = None) -> OdczytPDF:
+async def odczyt(ident: str, meta_tj: dict | None = None, plik_u: str | None = None) -> OdczytPDF:
     """Pobiera PDF tekstu jednolitego ident (np. DU/2026/1245), konwertuje go
     (w wątku, bo trwa to do ponad minuty) i przygotowuje dane do kontroli.
-    Wynik trzymany w pamięci procesu i na dysku."""
-    if ident in _odczyty:
-        return _odczyty[ident]
-    lock = _blokady.setdefault(ident, asyncio.Lock())
+    Wynik trzymany w pamięci procesu i na dysku. plik_u — zamiast tekstu
+    z Dz.U. plik typu „U” z ELI (tekst ujednolicony Kancelarii Sejmu, np.
+    Konstytucja: D19970483Lj.pdf); pamięć podręczna osobna."""
+    klucz = ident + ("#U" if plik_u else "")
+    if klucz in _odczyty:
+        return _odczyty[klucz]
+    lock = _blokady.setdefault(klucz, asyncio.Lock())
     async with lock:
-        if ident in _odczyty:
-            return _odczyty[ident]
+        if klucz in _odczyty:
+            return _odczyty[klucz]
         pub, year, pos = ident.split("/")
-        url_pdf = f"{BASE}/{pub}/{year}/{pos}/text.pdf"
+        url_pdf = (f"{BASE}/{pub}/{year}/{pos}/text/U/{plik_u}" if plik_u
+                   else f"{BASE}/{pub}/{year}/{pos}/text.pdf")
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        pos = pos + ("U" if plik_u else "")  # nazwy plików w pamięci podręcznej
         pdf_path = CACHE_DIR / f"{pub}_{year}_{pos}.pdf"
         async with httpx.AsyncClient(follow_redirects=True, timeout=60, headers=_HEADERS) as c:
             if meta_tj is None:
@@ -763,7 +768,7 @@ async def odczyt(ident: str, meta_tj: dict | None = None) -> OdczytPDF:
         przypisy = przypisy_md(md)
         jednostki, monotoniczne = jednostki_md(md, przypisy)
         raw_tok = _tokeny_pdftotext(raw) if raw else []
-        wyjasnienia = wyjasnienia_warstwy(raw_tok, przypisy, pos)
+        wyjasnienia = wyjasnienia_warstwy(raw_tok, przypisy, pos.rstrip("U"))
         wynik = OdczytPDF(ident=ident, url_pdf=url_pdf, sha256=sha,
                           data_tj=meta_tj.get("announcementDate") or "",
                           adres=meta_tj.get("displayAddress") or ident,
@@ -772,7 +777,7 @@ async def odczyt(ident: str, meta_tj: dict | None = None) -> OdczytPDF:
                           raw_tok=raw_tok, wyjasnienia=wyjasnienia, md=md)
         logger.info("odczyt pdf %s: artykulow=%d monotonicznie=%s pdftotext=%s",
                     ident, len(jednostki), monotoniczne, bool(raw))
-        _odczyty[ident] = wynik
+        _odczyty[klucz] = wynik
         return wynik
 
 

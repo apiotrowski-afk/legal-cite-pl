@@ -348,6 +348,9 @@ async def verify_article_na_dzien(citation: str, na_dzien: str) -> str:
             known = ", ".join(core.PL_ACTS)
             return (f"❌ Nieznany kod aktu: '{act}'\nObsługiwane: {known}\n"
                     f"Dowolną ustawę można wskazać adresem Dz.U., np. 'art. 5 Dz.U. 2024 poz. 1061'.")
+    if info.get("tekst_u"):
+        return (f"❌ Brzmienie na dzień nie jest dostępne dla {info['name']} — narzędzie podaje "
+                f"tylko aktualny tekst ujednolicony (bez dat zmian w tekście).")
     ref = f"art. {art}"
     nazwa = info["name"]
     naglowek_dnia = f"brzmienie na dzień {dzien:%d.%m.%Y}"
