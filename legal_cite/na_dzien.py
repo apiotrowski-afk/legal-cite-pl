@@ -333,10 +333,19 @@ async def verify_article_na_dzien(citation: str, na_dzien: str) -> str:
         return ("❌ Brzmienie na dzień jest dostępne tylko dla aktów polskich; dla aktów UE "
                 "narzędzie podaje wyłącznie aktualną wersję skonsolidowaną.")
     pl_key = core._resolve(act, core.PL_ACTS)
-    if not pl_key:
-        known = ", ".join(core.PL_ACTS)
-        return f"❌ Nieznany kod aktu: '{act}'\nObsługiwane: {known}"
-    info = core.PL_ACTS[pl_key]
+    if pl_key:
+        info = core.PL_ACTS[pl_key]
+    else:
+        try:
+            info = await core._akt_z_adresu(act)
+        except httpx.HTTPError:
+            return f"❌ Nie udało się pobrać metadanych aktu {act} z api.sejm.gov.pl"
+        if isinstance(info, str):
+            return info
+        if not info:
+            known = ", ".join(core.PL_ACTS)
+            return (f"❌ Nieznany kod aktu: '{act}'\nObsługiwane: {known}\n"
+                    f"Dowolną ustawę można wskazać adresem Dz.U., np. 'art. 5 Dz.U. 2024 poz. 1061'.")
     ref = f"art. {art}"
     nazwa = info["name"]
     naglowek_dnia = f"brzmienie na dzień {dzien:%d.%m.%Y}"

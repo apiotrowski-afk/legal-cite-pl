@@ -51,6 +51,11 @@ PL_ACTS: dict[str, dict] = {
     # z 2006 i 2009), a jego warstwa tekstowa nie przechodzi kontroli odczytu.
     "u.k.w.h.": dict(pub="DU", year=1982, pos=147,  name="Ustawa o księgach wieczystych i hipotece"),
     "u.m.w.p.": dict(pub="DU", year=2002, pos=1679, name="Ustawa o minimalnym wynagrodzeniu za pracę"),
+    # AML (sprawdzone w ELI 2026-10-28)
+    "AML":      dict(pub="DU", year=2018, pos=723,  name="Ustawa o przeciwdziałaniu praniu pieniędzy oraz finansowaniu terroryzmu"),
+    "u.p.p.p.f.t.": dict(pub="DU", year=2018, pos=723, name="Ustawa o przeciwdziałaniu praniu pieniędzy oraz finansowaniu terroryzmu"),
+    "ustawy AML": dict(pub="DU", year=2018, pos=723, name="Ustawa o przeciwdziałaniu praniu pieniędzy oraz finansowaniu terroryzmu"),
+    "ustawy o przeciwdziałaniu praniu pieniędzy oraz finansowaniu terroryzmu": dict(pub="DU", year=2018, pos=723, name="Ustawa o przeciwdziałaniu praniu pieniędzy oraz finansowaniu terroryzmu"),
     "ustawy o minimalnym wynagrodzeniu za pracę": dict(pub="DU", year=2002, pos=1679, name="Ustawa o minimalnym wynagrodzeniu za pracę"),
     "u.c.":     dict(pub="DU", year=2013, pos=1650, name="Ustawa o cudzoziemcach"),
     "ustawy o cudzoziemcach": dict(pub="DU", year=2013, pos=1650, name="Ustawa o cudzoziemcach"),
@@ -1414,6 +1419,54 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
             f"{'nie_dotyczy' if zrodlo == 'urzedowy_html' else 'tak'}")
 
 
+# --- Dowolna ustawa po adresie Dz.U. (bez słownika) ---
+# „Dz.U. 2024 poz. 1061”, „Dz. U. z 2024 r. poz. 1061”, „Dz.U. 2018 nr 12 poz. 34”, „DU/2024/1061”.
+# Adres tekstu jednolitego (obwieszczenie) jest zamieniany na akt, którego dotyczy
+# („Tekst jednolity dla aktu” w ELI) — silnik pracuje na akcie pierwotnym.
+_ADRES_DZU_RE = re.compile(
+    r'(?i)\bDz\.?\s*U\.?\s*(?:z\s*)?(\d{4})\s*(?:r\.)?\s*,?\s*(?:nr\s*\d+\s*,?\s*)?poz\.?\s*(\d+)'
+    r'|\bDU/(\d{4})/(\d+)\b')
+_akty_z_adresu: dict[str, dict | str] = {}
+
+
+async def _akt_z_adresu(tekst: str) -> dict | str | None:
+    """Słownik aktu (jak w PL_ACTS) dla adresu Dz.U. w tekście, komunikat odmowy
+    (str) albo None, gdy w tekście nie ma adresu."""
+    m = _ADRES_DZU_RE.search(tekst or "")
+    if not m:
+        return None
+    rok, poz = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+    ident = klucz = f"DU/{rok}/{poz}"
+    if klucz in _akty_z_adresu:
+        return _akty_z_adresu[klucz]
+    base = "https://api.sejm.gov.pl/eli/acts"
+    async with httpx.AsyncClient(follow_redirects=True, timeout=25, headers=_HEADERS) as c:
+        r = await c.get(f"{base}/{ident}")
+        if r.status_code == 404:
+            return f"❌ W Dzienniku Ustaw nie ma pozycji {_adres_dz_u(ident)} (API ELI: 404)."
+        r.raise_for_status()
+        meta = r.json()
+        dla = (meta.get("references") or {}).get("Tekst jednolity dla aktu") or []
+        if dla and dla[0].get("id"):
+            ident = dla[0]["id"]
+            r = await c.get(f"{base}/{ident}")
+            r.raise_for_status()
+            meta = r.json()
+    if meta.get("type") != "Ustawa":
+        wynik = (f"❌ {_adres_dz_u(ident)} to {(meta.get('type') or 'akt').lower()}, nie ustawa. "
+                 f"Po adresie Dz.U. narzędzie obsługuje ustawy (rozporządzenia numerują "
+                 f"przepisy paragrafami — jeszcze nieobsługiwane).")
+    elif meta.get("status") in ("uchylony", "wygaśnięcie aktu", "akt jednorazowy"):
+        wynik = (f"❌ {_adres_dz_u(ident)} ({meta.get('title', '')[:120]}) ma w ELI status "
+                 f"„{meta.get('status')}” — narzędzie podaje brzmienie obowiązujących ustaw.")
+    else:
+        _, rok, poz = ident.split("/")
+        tytul = re.sub(r'\s+', ' ', meta.get("title") or ident).strip().rstrip('.')
+        wynik = dict(pub="DU", year=int(rok), pos=int(poz), name=tytul)
+    _akty_z_adresu[klucz] = wynik
+    return wynik
+
+
 async def _odpowiedz_eu(info: dict, art: str, ustep: str | None, ref: str) -> str:
     """Artykuł aktu UE z najnowszej obowiązującej wersji skonsolidowanej, a gdy
     jej nie ma — z tekstu pierwotnego, z jawną informacją o zmianach."""
@@ -1517,8 +1570,21 @@ async def verify_article(citation: str) -> str:
         except httpx.TimeoutException:
             return f"❌ Timeout pobierania {info['name']} z EUR-Lex"
 
+    try:
+        info = await _akt_z_adresu(act)
+    except httpx.HTTPError:
+        return f"❌ Nie udało się pobrać metadanych aktu {act} z api.sejm.gov.pl"
+    if isinstance(info, str):
+        return info
+    if info:
+        try:
+            return await _odpowiedz_pl(info, art, ustep, ref)
+        except httpx.TimeoutException:
+            return f"❌ Timeout pobierania {info['name']} z api.sejm.gov.pl"
+
     known = ", ".join(dict.fromkeys(list(PL_ACTS) + list(EU_ACTS)))
-    return f"❌ Nieznany kod aktu: '{act}'\nObsługiwane: {known}"
+    return (f"❌ Nieznany kod aktu: '{act}'\nObsługiwane: {known}\n"
+            f"Dowolną ustawę można wskazać adresem Dz.U., np. 'art. 5 Dz.U. 2024 poz. 1061'.")
 
 
 def list_acts() -> str:

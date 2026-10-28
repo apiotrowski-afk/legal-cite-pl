@@ -39,6 +39,8 @@ async def verify_article(citation: str, na_dzien: str | None = None) -> str:
     narzędzie ODMAWIA zamiast podać starsze brzmienie.
     Format: 'art. N [ust. M] KOD'. Przykłady: 'art. 45 u.k.k.',
     'art. 385¹ KC', 'art. 18[3d] KP', 'art. 28 ust. 3 RODO'. Kody: list_acts().
+    Ustawę spoza listy wskaż adresem Dz.U. (także tekstu jednolitego):
+    'art. 5 Dz.U. 2024 poz. 1061', 'art. 2 Dz. U. z 2025 r. poz. 644', 'art. 1 DU/2018/723'.
     na_dzien (RRRR-MM-DD, tylko akty PL): brzmienie obowiązujące w tym dniu —
     z tekstu jednolitego sprzed tego dnia i kolejnego, z wykazem nowelizacji;
     „Ustalenie:” mówi, czy brzmienie jest potwierdzone, ustalone z treści

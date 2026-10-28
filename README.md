@@ -31,6 +31,7 @@ Measured on 2026-10-10 (8 acts whose newest consolidated text is PDF-only, 4676 
   Handles letter suffixes (`art. 36a`), `§` as a unit (`art. 58 § 2 KC`), superscript paragraphs (`art. 98 § 1¹ k.p.c.` / `§ 1[1]`), superscripts with letters (`art. 385¹` / `385[1]` / `131¹ᵃ` / `131[1a]`), dotted codes (`k.p.c.`).
   When a consolidated text prints **two wordings of the same paragraph/point** (current one and one entering into force later), the tool returns only the one in force today, chosen by the date in the footnote, and says so; if the date cannot be read, it refuses.
 - `list_acts()` — list of supported act codes (PL + EU).
+- Any Polish statute (ustawa) outside the list can be cited by its Journal of Laws address, including the address of a consolidated text: `art. 5 Dz.U. 2024 poz. 1061`, `art. 1 DU/2018/723`. Regulations (rozporządzenia) are not supported yet. A random sample of 100 in-force statutes outside the list (2026-10-28): 6,314 articles, 0 wrong wordings, 0 refusals, 1 explicit ambiguity (`testy/pokrycie_proba.py`).
 
 ### Run locally (stdio — Claude Desktop / Claude Code)
 ```bash
@@ -82,6 +83,7 @@ Aktualność to osobna linia: akty zmieniające (numer Dz.U. i data, wg wykazu E
 
 Pomiar 2026-10-10 (8 aktów z najnowszym t.j. tylko w PDF, 4676 artykułów): 99,7 % przechodzi kontrolę warstwy tekstowej; spośród obecnych w starszym HTML 4339 jest identycznych co do słowa. Wymagania: `pdftotext` (Debian/Ubuntu: `apt install poppler-utils`); bez niego ścieżka PDF odmawia. Pierwsza konwersja kodeksu trwa 30–90 s i jest trzymana na dysku (`LEGAL_CITE_CACHE`, domyślnie w katalogu tymczasowym systemu). Opcjonalnie `LEGAL_CITE_GCS_BUCKET` (instalacja `.[gcs]`) trzyma konwersje w Cloud Storage: nowa instancja pobiera je zamiast konwertować (nazwa pliku zawiera sumę PDF i wersję konwertera; kontrole wierności biegną na pobranym pliku tak samo; błąd zasobnika = powrót do konwersji). Na Cloud Run co najmniej `--memory=512Mi`.
 - `list_acts()` — lista obsługiwanych kodów aktów (PL + UE).
+- Dowolną ustawę spoza listy można wskazać adresem Dz.U., także adresem tekstu jednolitego: `art. 5 Dz.U. 2024 poz. 1061`, `art. 1 DU/2018/723`. Rozporządzenia jeszcze nieobsługiwane. Losowa próba 100 obowiązujących ustaw spoza listy (28.10.2026): 6314 artykułów, 0 błędnych brzmień, 0 odmów, 1 jawna niejednoznaczność (`testy/pokrycie_proba.py`).
 
 ### Uruchomienie lokalne (stdio — Claude Desktop / Claude Code)
 ```bash
