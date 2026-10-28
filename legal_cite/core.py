@@ -552,7 +552,7 @@ def _wiarygodny(art_text: str) -> bool:
     body = re.sub(r'^(?:Art\.|§)\s*[\d\sa-zA-Z]+\.', '', art_text, count=1).strip()
     # Przepis uchylony albo skreślony to prawidłowa odpowiedź, nie śmieć —
     # użytkownik ma się dowiedzieć, że artykuł nie obowiązuje.
-    if re.match(r'^\(\s*(?:uchylon|skreślon|skreslon|pominięt|pominiet)\w*\s*\)', body, re.IGNORECASE):
+    if re.match(r'^\(\s*(?:uchylon|skreślon|skreslon|pominięt|pominiet|wygasł|wygasl|wygaśnięt|wygasniet)\w*\s*\)', body, re.IGNORECASE):
         return True
     if len(body) < _MIN_TRESC:
         return False
