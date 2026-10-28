@@ -336,11 +336,13 @@ def jednostki_md(md: str, przypisy: dict[str, str],
     # artykuły ustawy stoją w załączniku, a nie w treści głównej. Bierzemy ten
     # blok dokumentu, w którym jest najwięcej artykułów.
     bloki = [drzewo.get("body") or []] + [a.get("body") or [] for a in drzewo.get("annexes") or []]
-    wezly = max(bloki, key=lambda b: sum(1 for n in b if n.get("type") == "art"))
+    # rozporządzenie nie ma artykułów — jednostką główną są paragrafy („par”)
+    glowna = "art" if any(n.get("type") == "art" for b in bloki for n in b) else "par"
+    wezly = max(bloki, key=lambda b: sum(1 for n in b if n.get("type") == glowna))
     out: list[Jednostka] = []
     monotonicznie, poprzedni = True, -1
     for node in wezly:
-        if node.get("type") != "art":
+        if node.get("type") != glowna:
             continue
         num = str(node.get("num", ""))
         klucz = kanon_md(num)

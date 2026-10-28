@@ -41,6 +41,8 @@ async def verify_article(citation: str, na_dzien: str | None = None) -> str:
     'art. 385¹ KC', 'art. 18[3d] KP', 'art. 28 ust. 3 RODO'. Kody: list_acts().
     Ustawę spoza listy wskaż adresem Dz.U. (także tekstu jednolitego):
     'art. 5 Dz.U. 2024 poz. 1061', 'art. 2 Dz. U. z 2025 r. poz. 644', 'art. 1 DU/2018/723'.
+    Ustawę można też wskazać tytułem ('art. 9 ustawy o ochronie konkurencji i konsumentów').
+    Rozporządzenie — paragrafem i adresem Dz.U.: '§ 2 ust. 1 Dz.U. 2025 poz. 1899'.
     na_dzien (RRRR-MM-DD, tylko akty PL): brzmienie obowiązujące w tym dniu —
     z tekstu jednolitego sprzed tego dnia i kolejnego, z wykazem nowelizacji;
     „Ustalenie:” mówi, czy brzmienie jest potwierdzone, ustalone z treści

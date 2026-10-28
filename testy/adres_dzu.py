@@ -30,7 +30,12 @@ sprawdz(adres("ustawy o KRS") is None, "bez adresu → None")
 async def main():
     for cyt, jest in [("art. 734 Dz.U. 2024 poz. 1061", "Kodeks cywilny"),          # adres t.j. → akt pierwotny
                       ("art. 2 ust. 1 AML", "praniu pieniędzy"),
-                      ("art. 3 DU/1997/88", "nie ustawa"),
+                      # rozporządzenia: jednostką główną jest paragraf (HTML i tylko-PDF)
+                      ("§ 2 Dz.U. 2019 poz. 2335", "§ 2. Ustala się zakres zadań pielęgniarki"),
+                      ("§ 2 ust. 1 Dz.U. 2025 poz. 1899", "Dotację lub skarbowe papiery wartościowe"),
+                      ("art. 1 Dz.U. 2024 poz. 1", "**, § 1"),
+                      ("§ 99 Dz.U. 2019 poz. 2335", "nie znaleziony"),
+                      ("art. 1 DU/2023/2421", "protokół"),
                       ("art. 1 Dz.U. 2099 poz. 99999", "404"),
                       # katalog po tytułach
                       ("art. 9 ustawy o ochronie konkurencji i konsumentów", "z dnia 16 lutego 2007 r."),

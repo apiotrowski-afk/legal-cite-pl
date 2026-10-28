@@ -39,7 +39,9 @@ UNIT = re.compile(r'<div class="unit unit_arti[^"]*" id="([^"]*)" data-id="arti_
 def jednostki(raw):
     """Numer artykułu → lista brzmień, w kolejności druku."""
     po = collections.OrderedDict()
-    for m in UNIT.finditer(raw):
+    # rozporządzenie: jednostką główną jest paragraf (para_N) — jak w core._jednostki_html
+    rx = UNIT if 'class="unit unit_arti' in raw else core._UNIT_PARA_RE
+    for m in rx.finditer(raw):
         if 'pass_' in m.group(1):
             continue
         tresc = _orig_strip(raw[m.start():core._koniec_div(raw, m.start())])

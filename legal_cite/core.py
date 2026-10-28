@@ -655,6 +655,8 @@ def _wybierz_po_sasiadach(text: str, art: str, kand: list) -> list:
 
 
 _UNIT_RE = re.compile(r'<div class="unit unit_arti[^"]*" id="([^"]*)" data-id="arti_([^"]+)"')
+# rozporządzenie: jednostką główną jest paragraf („para_N”), artykułów nie ma
+_UNIT_PARA_RE = re.compile(r'<div class="unit unit_para[^"]*" id="([^"]*)" data-id="para_([^"]+)"')
 _DIV_RE = re.compile(r'</?div\b[^>]*>', re.IGNORECASE)
 
 
@@ -955,7 +957,8 @@ def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | 
     mapa = _odnosniki(key, raw_html)
     dzis = _dzis()
     out = []
-    for m in _UNIT_RE.finditer(raw_html):
+    jedn_re = _UNIT_RE if 'class="unit unit_arti' in raw_html else _UNIT_PARA_RE
+    for m in jedn_re.finditer(raw_html):
         if 'pass_' in m.group(1):
             continue
         fragment = raw_html[m.start():_koniec_div(raw_html, m.start())]
@@ -1498,10 +1501,9 @@ async def _akt_z_adresu(tekst: str) -> dict | str | None:
             r = await c.get(f"{base}/{ident}")
             r.raise_for_status()
             meta = r.json()
-    if meta.get("type") != "Ustawa":
-        wynik = (f"❌ {_adres_dz_u(ident)} to {(meta.get('type') or 'akt').lower()}, nie ustawa. "
-                 f"Po adresie Dz.U. narzędzie obsługuje ustawy (rozporządzenia numerują "
-                 f"przepisy paragrafami — jeszcze nieobsługiwane).")
+    if meta.get("type") not in ("Ustawa", "Rozporządzenie"):
+        wynik = (f"❌ {_adres_dz_u(ident)} to {(meta.get('type') or 'akt').lower()}. Po adresie "
+                 f"Dz.U. narzędzie obsługuje ustawy i rozporządzenia.")
     elif (meta.get("entryIntoForce") or "") > _dt.date.today().isoformat() \
             or "oczekuj" in (meta.get("status") or ""):
         wynik = (f"❌ {_adres_dz_u(ident)} ({meta.get('title', '')[:120]}) jeszcze nie weszła "
@@ -1712,7 +1714,8 @@ async def verify_article(citation: str) -> str:
     ust_ety = ustep and re.sub(
         r'\[(\w+)\]', lambda x: x.group(1).translate(str.maketrans(
             "0123456789abcdefghijklmnoprstuvwxyz", "⁰¹²³⁴⁵⁶⁷⁸⁹ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ")), ustep)
-    ref = f"art. {art}" + (f" {jedn} {ust_ety}" if ustep else "")
+    glowna = "§" if citation.strip().startswith("§") else "art."
+    ref = f"{glowna} {art}" + (f" {jedn} {ust_ety}" if ustep else "")
     pl_key = _resolve(act, PL_ACTS)
     eu_key = _resolve(act, EU_ACTS)
 
@@ -1743,9 +1746,14 @@ async def verify_article(citation: str) -> str:
         return info
     if info:
         try:
-            return await _odpowiedz_pl(info, art, ustep, ref)
+            wynik = await _odpowiedz_pl(info, art, ustep, ref)
         except httpx.TimeoutException:
             return f"❌ Timeout pobierania {info['name']} z api.sejm.gov.pl"
+        # rozporządzenie zacytowane jako „art. N”: treść to „§ N.” — etykieta jak w źródle
+        if glowna == "art." and re.search(rf'(?m)^§ {re.escape(art)}\.', wynik) \
+                and not re.search(rf'(?m)^Art\. {re.escape(art)}\.', wynik):
+            wynik = wynik.replace(f"**, {ref}", f"**, § {ref[len('art. '):]}", 1)
+        return wynik
 
     known = ", ".join(dict.fromkeys(list(PL_ACTS) + list(EU_ACTS)))
     return (f"❌ Nieznany kod aktu: '{act}'\nObsługiwane: {known}\n"

@@ -5,7 +5,7 @@ spoza słownika PL_ACTS przechodzi test pokrycia bez poprawek. Próba: ustawy
 obowiązujące z Dz.U. bez nowelizujących, ratyfikacyjnych, budżetowych
 i jednorazowych; losowanie z ziarnem, więc przebieg jest powtarzalny.
 
-    python testy/pokrycie_proba.py [N=100] [ziarno=2026] [plik-wyniku.json]
+    python testy/pokrycie_proba.py [N=100] [ziarno=2026] [plik-wyniku.json] [typ=Ustawa|Rozporządzenie]
 """
 import json, pathlib, random, runpy, sys, urllib.parse, urllib.request
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -14,10 +14,11 @@ from legal_cite import core
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 100
 ZIARNO = int(sys.argv[2]) if len(sys.argv) > 2 else 2026
 WYNIK = sys.argv[3] if len(sys.argv) > 3 else "/tmp/pokrycie_proba.json"
+TYP = sys.argv[4] if len(sys.argv) > 4 else "Ustawa"
 
 ustawy, off = [], 0
 while True:
-    q = urllib.parse.urlencode({"publisher": "DU", "type": "Ustawa", "inForce": "1", "limit": 500, "offset": off})
+    q = urllib.parse.urlencode({"publisher": "DU", "type": TYP, "inForce": "1", "limit": 500, "offset": off})
     it = json.load(urllib.request.urlopen("https://api.sejm.gov.pl/eli/acts/search?" + q, timeout=60)).get("items", [])
     ustawy += it
     if len(it) < 500:
