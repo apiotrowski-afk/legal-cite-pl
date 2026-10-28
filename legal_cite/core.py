@@ -709,6 +709,31 @@ _ZDANIE_DO_ZMIANY_RE = re.compile(
     r'.*?odnośniku\s+(\d+)')
 
 
+def _wybierz_zdania_html(fragment: str, mapa: dict[str, str], dzis: _dt.date,
+                        uwagi: list[str]) -> tuple[str, set[str]]:
+    """Jak pdf_tj._wybierz_zdania, na HTML ELI: nowe brzmienie zdania (od końca
+    odnośnika A do końca odnośnika B) wycinane, gdy jeszcze nie obowiązuje.
+    Zwraca fragment i numery rozstrzygniętych odnośników A."""
+    ok: set[str] = set()
+    for m in list(_PIERWSZY_ODNOSNIK_RE.finditer(fragment))[::-1]:
+        z = _ZDANIE_DO_ZMIANY_RE.search(mapa.get(m.group(1)) or "")
+        if not z:
+            continue
+        nast = _PIERWSZY_ODNOSNIK_RE.search(fragment, m.end())
+        if not nast or nast.group(1) != z.group(2):
+            continue
+        d = _data_wejscia(mapa, z.group(2))
+        if d is None or d <= dzis:
+            continue
+        koniec = fragment.find("</a>", nast.end())
+        koniec = koniec + 4 if koniec >= 0 else nast.end()
+        fragment = fragment[:m.end()] + fragment[koniec:]
+        ok.add(m.group(1))
+        uwagi.append(f"⚠ Zdanie {z.group(1)}: tekst jednolity drukuje dwa brzmienia; powyżej "
+                     f"obowiązujące, nowe wchodzi w życie {d:%d.%m.%Y}.")
+    return fragment, ok
+
+
 def _zdania_dwa_brzmienia(mapa: dict[str, str], numery: list[str]) -> list[str]:
     """Opisy zdań wydrukowanych w dwóch brzmieniach (puste, gdy takich nie ma)."""
     out = []
@@ -934,7 +959,9 @@ def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | 
         przyszle = _jeszcze_nie(mapa, _wlasny_odnosnik_html(fragment, 0, len(fragment)), dzis)
         uwagi: list[str] = []
         fragment = _wybierz_podjednostki_html(fragment, mapa, dzis, uwagi)
-        zdania = _zdania_dwa_brzmienia(mapa, _PIERWSZY_ODNOSNIK_RE.findall(fragment))
+        fragment, zdania_ok = _wybierz_zdania_html(fragment, mapa, dzis, uwagi)
+        zdania = _zdania_dwa_brzmienia(mapa, [x for x in _PIERWSZY_ODNOSNIK_RE.findall(fragment)
+                                              if x not in zdania_ok])
         if zdania:
             uwagi += [NIEJEDNOZNACZNE] + zdania
         # „arti_131_1_a” (t.j. 2024) i „arti_131_1a” to ten sam art. 131¹ᵃ — klucz jak
@@ -971,6 +998,10 @@ def _napraw_zlepki(key: str, jedn: list[tuple]) -> list[tuple]:
     dokładnie między sąsiadami — na 5804 artykułach dwunastu aktów taki
     przypadek jest jeden, więc warunek jest wąski, a nie zgadywanie.
     """
+    # akty numerujące artykuły cyframi rzymskimi („Art. I.” — przepisy wprowadzające
+    # k.p., DU/1974/142): nie ma tu czego naprawiać, a int() by się wywrócił
+    if any(not re.match(r'\d', n) for n, *_ in jedn):
+        return jedn
     bazy = [int(re.match(r'(\d+)', n).group(1)) for n, *_ in jedn]
     for i in range(1, len(jedn) - 1):
         if bazy[i - 1] < bazy[i] < bazy[i + 1]:
@@ -1091,8 +1122,13 @@ def extract_pl_article(text: str, art: str, ustep: str | None) -> str | None:
     kand = []
     # Granica końca musi być jednostką TEJ SAMEJ rangi co początek: artykuł
     # kończy się na następnym artykule, nie na własnym paragrafie.
-    for prefix, granica in ((rf'Art\.\s*{frag}\s*\.', r'\bArt\.\s*\d+'),
-                            (rf'§\s*{frag}\s*\.', r'§\s*\d+')):
+    # „§ N” jako jednostka główna tylko w tekście bez nagłówków „Art.” — inaczej
+    # „art. 1” aktu numerowanego rzymsko (DU/1974/142: „Art. I.”) trafiał w „§ 1.”
+    # cudzego artykułu
+    wzorce = [(rf'Art\.\s*{frag}\s*\.', r'\bArt\.\s*\d+')]
+    if not re.search(r'\bArt\.\s*(?:\d|[IVXLC]+\s*\.)', text):
+        wzorce.append((rf'§\s*{frag}\s*\.', r'§\s*\d+'))
+    for prefix, granica in wzorce:
         for m in re.finditer(prefix, text):
             nxt = re.search(granica, text[m.end():])
             end = m.end() + nxt.start() if nxt else min(m.start() + 4000, len(text))
@@ -1232,6 +1268,10 @@ async def _odpowiedz_pl(info: dict, art: str, ustep: str | None, ref: str) -> st
             return _odmowa_przyszly(
                 info, ref, najnowszy["meta"].get("displayAddress") or najnowszy["id"],
                 f"https://api.sejm.gov.pl/eli/acts/{najnowszy['id']}/text.pdf", e.data, e.dodany)
+        jedn_html = _jednostki_html(key, raw) if raw else []
+        if result is None and jedn_html and not any(re.match(r'\d', n) for n, *_ in jedn_html):
+            return (f"❌ {ref} {info['name']}: akt numeruje artykuły cyframi rzymskimi "
+                    f"(„Art. I.”, „Art. II.”) — takie numery nie są jeszcze obsługiwane.")
         if result is None and not (raw and _kanon_art(art) and any(
                 n == _kanon_art(art) for n, *_ in _jednostki_html(key, raw))):
             # ścieżka zapasowa (regex po tekście) tylko, gdy struktura źródła nie zna
@@ -1467,6 +1507,94 @@ async def _akt_z_adresu(tekst: str) -> dict | str | None:
     return wynik
 
 
+# --- Ustawa po tytule (katalog z API ELI) ---
+# „ustawy o ochronie konkurencji i konsumentów”, „Prawo bankowe”: katalog obowiązujących
+# ustaw merytorycznych (bez nowelizujących, ratyfikacyjnych, budżetowych) pobierany
+# z wyszukiwarki ELI raz na dobę. Dopasowanie dokładne po przedmiocie albo — dla form
+# odmienionych („Prawa bankowego”) — po rdzeniach wyrazów, wyłącznie przy jednym
+# trafieniu; inaczej odmowa z listą kandydatów. Nigdy nie zgadujemy aktu.
+_katalog: tuple[float, list[dict]] | None = None
+_KATALOG_TTL = 24 * 3600
+_NIEMERYTORYCZNE = ("o zmianie", "o zmianach", "zmieniająca", "ratyfikacji", "ustawa budżetowa")
+
+
+async def _katalog_ustaw() -> list[dict]:
+    global _katalog
+    if _katalog and time.time() - _katalog[0] < _KATALOG_TTL:
+        return _katalog[1]
+    out, off = [], 0
+    async with httpx.AsyncClient(timeout=60, headers=_HEADERS) as c:
+        while True:
+            r = await c.get("https://api.sejm.gov.pl/eli/acts/search", params={
+                "publisher": "DU", "type": "Ustawa", "inForce": "1", "limit": 500, "offset": off})
+            r.raise_for_status()
+            it = r.json().get("items", [])
+            out += [x for x in it
+                    if not any(n in (x.get("title") or "").lower() for n in _NIEMERYTORYCZNE)
+                    and x.get("status") in ("akt posiada tekst jednolity", "obowiązujący")]
+            if len(it) < 500:
+                break
+            off += 500
+    _katalog = (time.time(), out)
+    return out
+
+
+def _przedmiot(tytul: str) -> str:
+    """„Ustawa z dnia 16 lutego 2007 r. o ochronie konkurencji i konsumentów” →
+    „o ochronie konkurencji i konsumentów”; „… r. - Prawo bankowe” → „prawo bankowe”;
+    „ustawy o ochronie…” (z cytatu) → „o ochronie…”."""
+    t = re.sub(r'\s+', ' ', tytul or '').strip().lower().rstrip('.')
+    t = re.sub(r'^ustaw\w*\s*', '', t)
+    t = re.sub(r'^z\s+dnia\s+\d{1,2}\s+\S+\s+\d{4}\s*r\.?\s*', '', t)
+    return re.sub(r'^[-–]\s*', '', t).strip()
+
+
+def _rdzenie(t: str) -> tuple[str, ...]:
+    return tuple(w[:4] for w in re.findall(r'\w+', t) if len(w) >= 3)
+
+
+async def _akt_z_tytulu(tekst: str) -> dict | str | None:
+    """Słownik aktu dla tytułu ustawy, komunikat odmowy (str) albo None, gdy tekst
+    nie wygląda na tytuł (np. nieznany skrót)."""
+    q = _przedmiot(tekst)
+    if len(q) < 8 or not (q.startswith("o ") or " " in q):
+        return None
+    kat = await _katalog_ustaw()
+    # data z cytatu („ustawy z dnia 29 sierpnia 1997 r. o ochronie danych osobowych”)
+    # rozstrzyga: ten sam przedmiot ma też ustawa z 2018 r. — bez filtra trafilibyśmy w nią
+    data = re.search(r'z\s+dnia\s+(\d{1,2}\s+\S+\s+\d{4})', tekst or "", re.IGNORECASE)
+    if data:
+        dz = re.sub(r'\s+', ' ', data.group(1)).lower()
+        kat = [x for x in kat if dz in re.sub(r'\s+', ' ', (x.get("title") or "")).lower()]
+        if not kat:
+            return (f"❌ Wśród obowiązujących ustaw nie ma ustawy z dnia {data.group(1)} r. o tym "
+                    f"przedmiocie („{tekst}”) — mogła zostać uchylona. Sprawdź adres Dz.U.; "
+                    f"narzędzie podaje brzmienie obowiązujących ustaw.")
+    dokladne = [x for x in kat if _przedmiot(x.get("title")) == q]
+    if not dokladne:
+        rq = _rdzenie(q)
+        dokladne = [x for x in kat if _rdzenie(_przedmiot(x.get("title"))) == rq] if len(rq) >= 2 else []
+    if not dokladne and data:
+        return (f"❌ Wśród obowiązujących ustaw nie ma ustawy z dnia {data.group(1)} r. o tym "
+                f"przedmiocie („{tekst}”) — mogła zostać uchylona. Sprawdź adres Dz.U.; "
+                f"narzędzie podaje brzmienie obowiązujących ustaw.")
+    if len(dokladne) == 1:
+        x = dokladne[0]
+        return dict(pub="DU", year=x["year"], pos=x["pos"],
+                    name=re.sub(r'\s+', ' ', x.get("title") or "").strip().rstrip('.'))
+    if len(dokladne) > 1:
+        kand = dokladne
+    else:
+        rq = set(_rdzenie(q))
+        kand = sorted((x for x in kat if rq & set(_rdzenie(_przedmiot(x.get("title"))))),
+                      key=lambda x: -len(rq & set(_rdzenie(_przedmiot(x.get("title"))))))[:5]
+        if not kand:
+            return None
+    lista = "; ".join(f"{(x.get('title') or '')[:110]} — Dz.U. {x['year']} poz. {x['pos']}" for x in kand[:5])
+    return (f"❌ Nie da się jednoznacznie ustalić ustawy dla „{tekst}”. Kandydaci: {lista}. "
+            f"Wskaż akt adresem Dz.U., np. 'art. 1 Dz.U. {kand[0]['year']} poz. {kand[0]['pos']}'.")
+
+
 async def _odpowiedz_eu(info: dict, art: str, ustep: str | None, ref: str) -> str:
     """Artykuł aktu UE z najnowszej obowiązującej wersji skonsolidowanej, a gdy
     jej nie ma — z tekstu pierwotnego, z jawną informacją o zmianach."""
@@ -1574,6 +1702,11 @@ async def verify_article(citation: str) -> str:
         info = await _akt_z_adresu(act)
     except httpx.HTTPError:
         return f"❌ Nie udało się pobrać metadanych aktu {act} z api.sejm.gov.pl"
+    if info is None:
+        try:
+            info = await _akt_z_tytulu(act)
+        except httpx.HTTPError:
+            return f"❌ Nie udało się pobrać katalogu ustaw z api.sejm.gov.pl"
     if isinstance(info, str):
         return info
     if info:

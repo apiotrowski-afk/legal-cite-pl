@@ -264,13 +264,39 @@ def _wybierz_dzieci(dzieci: list[dict], wyb: dict) -> list[dict]:
     return [ch for i, ch in enumerate(dzieci) if i not in pomin]
 
 
+def _wybierz_zdania(tekst: str, wyb: dict) -> str:
+    """Zdanie wydrukowane w dwóch brzmieniach jedno po drugim: „stare.[^A] nowe.[^B]”,
+    gdzie odnośnik A mówi „Zdanie … w tym brzmieniu obowiązuje do wejścia w życie
+    zmiany, o której mowa w odnośniku B”, a B podaje datę nowego brzmienia (art. 505
+    k.p.k., t.j. 2026: od 1.10.2029). Gdy nowe brzmienie jeszcze nie obowiązuje,
+    wycinamy je (od A do B włącznie) — początek nowego zdania wyznacza odnośnik A.
+    Gdy już obowiązuje, początku STAREGO zdania nie da się pewnie wyznaczyć, więc
+    para zostaje i jednostka będzie niejednoznaczna (odmowa)."""
+    from legal_cite.core import _ZDANIE_DO_ZMIANY_RE, _data_wejscia
+    for m in list(_PRZYPIS_RE.finditer(tekst))[::-1]:  # od końca: wycięcia nie przesuwają wcześniejszych
+        z = _ZDANIE_DO_ZMIANY_RE.search(wyb["przypisy"].get(m.group(1)) or "")
+        if not z:
+            continue
+        nast = _PRZYPIS_RE.search(tekst, m.end())
+        if not nast or nast.group(1) != z.group(2):
+            continue
+        d = _data_wejscia(wyb["przypisy"], z.group(2))
+        if d is None or d <= wyb["dzis"]:
+            continue
+        tekst = tekst[:m.start()] + tekst[nast.end():]
+        wyb["zdania_ok"].add(m.group(1))
+        wyb["uwagi"].append(f"⚠ Zdanie {z.group(1)}: tekst jednolity drukuje dwa brzmienia; powyżej "
+                            f"obowiązujące, nowe wchodzi w życie {d:%d.%m.%Y}.")
+    return tekst
+
+
 def _tekst_wezla(node: dict, odn: list[str], stop: list[bool], wyb: dict | None = None) -> str:
     typ = node.get("type")
     czesci = []
     if typ in _ETYKIETY:
         czesci.append(_ETYKIETY[typ].format(n=node.get("num", "")))
     if node.get("text"):
-        czesci.append(node["text"])
+        czesci.append(_wybierz_zdania(node["text"], wyb) if wyb is not None else node["text"])
     dzieci = node.get("children") or []
     if wyb is not None:
         dzieci = _wybierz_dzieci(dzieci, wyb)
@@ -322,14 +348,14 @@ def jednostki_md(md: str, przypisy: dict[str, str],
         odn: list[str] = []
         pelny = _tekst_wezla(node, odn, [False])
         wyb = {"przypisy": przypisy, "dzis": dzis or _dt.date.today(), "uwagi": [],
-               "niejednoznaczne": False}
+               "niejednoznaczne": False, "zdania_ok": set()}
         tekst = _tekst_wezla(node, [], [False], wyb)
         # data brzmienia artykułu: z odnośnika przy jego oznaczeniu, a nie z
         # pierwszego odnośnika w treści — ten bywa odnośnikiem paragrafu
         # (art. 860 k.c.: „Dodany…” przy § 3 nie datuje całego artykułu)
         wlasny = _wlasny_odnosnik(node)
         data = _data_wejscia(przypisy, wlasny) if wlasny else None
-        zdania = _zdania_dwa_brzmienia(przypisy, odn)  # art. 505 k.p.k. (#13)
+        zdania = _zdania_dwa_brzmienia(przypisy, [x for x in odn if x not in wyb["zdania_ok"]])  # #13
         if zdania:
             wyb["niejednoznaczne"] = True
             wyb["uwagi"] += zdania

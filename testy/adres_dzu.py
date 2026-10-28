@@ -1,4 +1,4 @@
-"""Dowolna ustawa po adresie Dz.U. — rozpoznawanie adresu bez sieci, reszta z siecią.
+"""Dowolna ustawa po adresie Dz.U. albo tytule — rozpoznawanie adresu bez sieci, reszta z siecią.
 
     python testy/adres_dzu.py
 """
@@ -31,7 +31,16 @@ async def main():
     for cyt, jest in [("art. 734 Dz.U. 2024 poz. 1061", "Kodeks cywilny"),          # adres t.j. → akt pierwotny
                       ("art. 2 ust. 1 AML", "praniu pieniędzy"),
                       ("art. 3 DU/1997/88", "nie ustawa"),
-                      ("art. 1 Dz.U. 2099 poz. 99999", "404")]:
+                      ("art. 1 Dz.U. 2099 poz. 99999", "404"),
+                      # katalog po tytułach
+                      ("art. 9 ustawy o ochronie konkurencji i konsumentów", "z dnia 16 lutego 2007 r."),
+                      ("art. 5 Prawa bankowego", "Prawo bankowe"),
+                      ("art. 1 ustawy o podatku", "Nie da się jednoznacznie"),
+                      # data rozstrzyga: ustawa z 1997 r. o ochronie danych osobowych uchylona
+                      ("art. 2 ustawy z dnia 29 sierpnia 1997 r. o ochronie danych osobowych", "mogła zostać uchylona"),
+                      ("art. 2 ustawy z dnia 10 maja 2018 r. o ochronie danych osobowych", "10 maja 2018"),
+                      # akt numerowany rzymsko: „art. 1” nie może trafić w „§ 1.” cudzego artykułu
+                      ("art. 1 DU/1974/142", "❌")]:
         r = await core.verify_article(cyt)
         sprawdz(jest in r, f"{cyt} → zawiera {jest!r}")
 

@@ -338,6 +338,8 @@ async def verify_article_na_dzien(citation: str, na_dzien: str) -> str:
     else:
         try:
             info = await core._akt_z_adresu(act)
+            if info is None:
+                info = await core._akt_z_tytulu(act)
         except httpx.HTTPError:
             return f"❌ Nie udało się pobrać metadanych aktu {act} z api.sejm.gov.pl"
         if isinstance(info, str):
