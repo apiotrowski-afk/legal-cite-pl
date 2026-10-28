@@ -123,7 +123,12 @@ _NOTKA_RE = re.compile(r"[⁰¹²³⁴⁵⁶⁷⁸⁹]+⁾")
 # przez…”): pdftotext wypisuje ją osobno, a jako słowo „i” nie była pomijana przy porównaniu
 # z warstwą — odmowa dla artykułów ze strony z tym odnośnikiem (O.p. art. 3; #6, propozycja
 # @PolskiAgentW: 491 t.j. 2025–2026 bez HTML, odmów 341 → 313, nowych 0)
-_RZYMSKA_ETYKIETA_RE = re.compile(r"(?<![\w(])[IVX]+\)")
+# Tylko w pozycji etykiety — po numerze odnośnika („1)I)”), po „⁾”, na początku wiersza
+# albo przypisu („[^1]: I) Niniejsza…”, „…2023). I) Odnośnik…”) i przed wielką literą lub
+# cyfrą; w treści („załącznik I) rozporządzenia”) liczba rzymska zostaje, bo inaczej
+# zmiana „I” → „II” przechodziłaby porównanie jako identyczna (przegląd Astry).
+_RZYMSKA_ETYKIETA_RE = re.compile(
+    r"(?:(?<=\d\))|(?<=⁾)|(?<=[.:)]\s)|^)[ \t]*[IVX]{1,4}\)(?=\s+[A-ZĄĆĘŁŃÓŚŹŻ\d])", re.M)
 _SLOWO_RE = re.compile(r"\x01?[^\W_]+", re.UNICODE)
 _LITERA_CYFRA_RE = re.compile(r"(?<=[^\W\d_])(?=\d)", re.UNICODE)
 
@@ -349,13 +354,14 @@ def jednostki_md(md: str, przypisy: dict[str, str],
         pelny = _tekst_wezla(node, odn, [False])
         wyb = {"przypisy": przypisy, "dzis": dzis or _dt.date.today(), "uwagi": [],
                "niejednoznaczne": False, "zdania_ok": set()}
-        tekst = _tekst_wezla(node, [], [False], wyb)
+        odn_wyb: list[str] = []
+        tekst = _tekst_wezla(node, odn_wyb, [False], wyb)
         # data brzmienia artykułu: z odnośnika przy jego oznaczeniu, a nie z
         # pierwszego odnośnika w treści — ten bywa odnośnikiem paragrafu
         # (art. 860 k.c.: „Dodany…” przy § 3 nie datuje całego artykułu)
         wlasny = _wlasny_odnosnik(node)
         data = _data_wejscia(przypisy, wlasny) if wlasny else None
-        zdania = _zdania_dwa_brzmienia(przypisy, [x for x in odn if x not in wyb["zdania_ok"]])  # #13
+        zdania = _zdania_dwa_brzmienia(przypisy, odn_wyb)  # tylko nierozstrzygnięte wystąpienia (#13)
         if zdania:
             wyb["niejednoznaczne"] = True
             wyb["uwagi"] += zdania
@@ -634,6 +640,9 @@ class OdczytPDF:
 
 _odczyty: dict[str, OdczytPDF] = {}
 _blokady: dict[str, asyncio.Lock] = {}
+# Konwersja eli2md to minuta CPU i setki MB; przy dowolnych ustawach (adres Dz.U.,
+# katalog) seria zapytań o różne akty uruchamiała je równolegle — jedna naraz.
+_KONWERSJE = asyncio.Semaphore(1)
 
 
 # --- trwały cache w Cloud Storage (opcjonalny) ------------------------------
@@ -745,9 +754,10 @@ async def odczyt(ident: str, meta_tj: dict | None = None) -> OdczytPDF:
         stempel = hashlib.sha256((sha + wersja).encode()).hexdigest()[:16]
         md_path = CACHE_DIR / f"{pub}_{year}_{pos}_{stempel}.md"
         txt_path = CACHE_DIR / f"{pub}_{year}_{pos}_{sha[:16]}.txt"
-        md, raw = await asyncio.gather(
-            asyncio.to_thread(_konwertuj, pdf_path, md_path),
-            asyncio.to_thread(_warstwa, pdf_path, txt_path))
+        async with _KONWERSJE:
+            md, raw = await asyncio.gather(
+                asyncio.to_thread(_konwertuj, pdf_path, md_path),
+                asyncio.to_thread(_warstwa, pdf_path, txt_path))
         przypisy = przypisy_md(md)
         jednostki, monotoniczne = jednostki_md(md, przypisy)
         raw_tok = _tokeny_pdftotext(raw) if raw else []

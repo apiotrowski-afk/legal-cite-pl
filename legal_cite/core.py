@@ -725,9 +725,13 @@ def _wybierz_zdania_html(fragment: str, mapa: dict[str, str], dzis: _dt.date,
         d = _data_wejscia(mapa, z.group(2))
         if d is None or d <= dzis:
             continue
-        koniec = fragment.find("</a>", nast.end())
-        koniec = koniec + 4 if koniec >= 0 else nast.end()
-        fragment = fragment[:m.end()] + fragment[koniec:]
+        # Odnośnik ELI to <a class="gloss-link"><sup>N)</sup><span tooltip>…</span></A>,
+        # a _strip_html usuwa go w całości do najbliższego </a> — cięcie w środku odnośnika
+        # zjadało obowiązującą treść za nim (przegląd Astry, 28.10.2026).
+        koniec = re.compile(r'</a\s*>', re.IGNORECASE).search(fragment, nast.end())
+        if not koniec:
+            continue
+        fragment = fragment[:m.start()] + " " + fragment[koniec.end():]
         ok.add(m.group(1))
         uwagi.append(f"⚠ Zdanie {z.group(1)}: tekst jednolity drukuje dwa brzmienia; powyżej "
                      f"obowiązujące, nowe wchodzi w życie {d:%d.%m.%Y}.")
@@ -959,9 +963,11 @@ def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | 
         przyszle = _jeszcze_nie(mapa, _wlasny_odnosnik_html(fragment, 0, len(fragment)), dzis)
         uwagi: list[str] = []
         fragment = _wybierz_podjednostki_html(fragment, mapa, dzis, uwagi)
-        fragment, zdania_ok = _wybierz_zdania_html(fragment, mapa, dzis, uwagi)
-        zdania = _zdania_dwa_brzmienia(mapa, [x for x in _PIERWSZY_ODNOSNIK_RE.findall(fragment)
-                                              if x not in zdania_ok])
+        fragment, _ = _wybierz_zdania_html(fragment, mapa, dzis, uwagi)
+        # tylko odnośniki, które ZOSTAŁY we fragmencie: rozstrzygnięte wystąpienie znika
+        # razem z nowym brzmieniem, nierozstrzygnięte (inne wystąpienie tego samego
+        # odnośnika) nadal daje odmowę
+        zdania = _zdania_dwa_brzmienia(mapa, _PIERWSZY_ODNOSNIK_RE.findall(fragment))
         if zdania:
             uwagi += [NIEJEDNOZNACZNE] + zdania
         # „arti_131_1_a” (t.j. 2024) i „arti_131_1a” to ten sam art. 131¹ᵃ — klucz jak
@@ -1466,7 +1472,7 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
 _ADRES_DZU_RE = re.compile(
     r'(?i)\bDz\.?\s*U\.?\s*(?:z\s*)?(\d{4})\s*(?:r\.)?\s*,?\s*(?:nr\s*\d+\s*,?\s*)?poz\.?\s*(\d+)'
     r'|\bDU/(\d{4})/(\d+)\b')
-_akty_z_adresu: dict[str, dict | str] = {}
+_akty_z_adresu: dict[str, tuple[float, dict | str]] = {}
 
 
 async def _akt_z_adresu(tekst: str) -> dict | str | None:
@@ -1477,8 +1483,8 @@ async def _akt_z_adresu(tekst: str) -> dict | str | None:
         return None
     rok, poz = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
     ident = klucz = f"DU/{rok}/{poz}"
-    if klucz in _akty_z_adresu:
-        return _akty_z_adresu[klucz]
+    if klucz in _akty_z_adresu and time.time() - _akty_z_adresu[klucz][0] < _KATALOG_TTL:
+        return _akty_z_adresu[klucz][1]
     base = "https://api.sejm.gov.pl/eli/acts"
     async with httpx.AsyncClient(follow_redirects=True, timeout=25, headers=_HEADERS) as c:
         r = await c.get(f"{base}/{ident}")
@@ -1496,6 +1502,11 @@ async def _akt_z_adresu(tekst: str) -> dict | str | None:
         wynik = (f"❌ {_adres_dz_u(ident)} to {(meta.get('type') or 'akt').lower()}, nie ustawa. "
                  f"Po adresie Dz.U. narzędzie obsługuje ustawy (rozporządzenia numerują "
                  f"przepisy paragrafami — jeszcze nieobsługiwane).")
+    elif (meta.get("entryIntoForce") or "") > _dt.date.today().isoformat() \
+            or "oczekuj" in (meta.get("status") or ""):
+        wynik = (f"❌ {_adres_dz_u(ident)} ({meta.get('title', '')[:120]}) jeszcze nie weszła "
+                 f"w życie (wg ELI: {meta.get('entryIntoForce') or meta.get('status')}) — narzędzie "
+                 f"podaje brzmienie obowiązujących ustaw.")
     elif meta.get("status") in ("uchylony", "wygaśnięcie aktu", "akt jednorazowy"):
         wynik = (f"❌ {_adres_dz_u(ident)} ({meta.get('title', '')[:120]}) ma w ELI status "
                  f"„{meta.get('status')}” — narzędzie podaje brzmienie obowiązujących ustaw.")
@@ -1503,7 +1514,7 @@ async def _akt_z_adresu(tekst: str) -> dict | str | None:
         _, rok, poz = ident.split("/")
         tytul = re.sub(r'\s+', ' ', meta.get("title") or ident).strip().rstrip('.')
         wynik = dict(pub="DU", year=int(rok), pos=int(poz), name=tytul)
-    _akty_z_adresu[klucz] = wynik
+    _akty_z_adresu[klucz] = (time.time(), wynik)
     return wynik
 
 
@@ -1553,6 +1564,27 @@ def _rdzenie(t: str) -> tuple[str, ...]:
     return tuple(w[:4] for w in re.findall(r'\w+', t) if len(w) >= 3)
 
 
+def _wyrazy(t: str) -> list[str]:
+    return [w for w in re.findall(r'\w+', t) if len(w) >= 3]
+
+
+def _ta_sama_odmiana(a: str, b: str) -> bool:
+    """Ten sam przedmiot w innym przypadku („prawa bankowego” / „prawo bankowe”):
+    wyrazy parami różnią się najwyżej końcówką (do 3 liter). Czteroliterowy
+    prefiks sam nie wystarcza — „o kredycie konsolidacyjnym” to nie „o kredycie
+    konsumenckim” (przegląd Astry, 28.10.2026)."""
+    wa, wb = _wyrazy(a), _wyrazy(b)
+    if len(wa) != len(wb) or len(wa) < 2:
+        return False
+    for x, y in zip(wa, wb):
+        n = 0
+        while n < min(len(x), len(y)) and x[n] == y[n]:
+            n += 1
+        if n < max(4, min(len(x), len(y)) - 3):
+            return False
+    return True
+
+
 async def _akt_z_tytulu(tekst: str) -> dict | str | None:
     """Słownik aktu dla tytułu ustawy, komunikat odmowy (str) albo None, gdy tekst
     nie wygląda na tytuł (np. nieznany skrót)."""
@@ -1565,15 +1597,15 @@ async def _akt_z_tytulu(tekst: str) -> dict | str | None:
     data = re.search(r'z\s+dnia\s+(\d{1,2}\s+\S+\s+\d{4})', tekst or "", re.IGNORECASE)
     if data:
         dz = re.sub(r'\s+', ' ', data.group(1)).lower()
-        kat = [x for x in kat if dz in re.sub(r'\s+', ' ', (x.get("title") or "")).lower()]
+        kat = [x for x in kat
+               if re.search(rf'z dnia (?<!\d){re.escape(dz)}\b', re.sub(r'\s+', ' ', (x.get("title") or "")).lower())]
         if not kat:
             return (f"❌ Wśród obowiązujących ustaw nie ma ustawy z dnia {data.group(1)} r. o tym "
                     f"przedmiocie („{tekst}”) — mogła zostać uchylona. Sprawdź adres Dz.U.; "
                     f"narzędzie podaje brzmienie obowiązujących ustaw.")
     dokladne = [x for x in kat if _przedmiot(x.get("title")) == q]
     if not dokladne:
-        rq = _rdzenie(q)
-        dokladne = [x for x in kat if _rdzenie(_przedmiot(x.get("title"))) == rq] if len(rq) >= 2 else []
+        dokladne = [x for x in kat if _ta_sama_odmiana(q, _przedmiot(x.get("title")))]
     if not dokladne and data:
         return (f"❌ Wśród obowiązujących ustaw nie ma ustawy z dnia {data.group(1)} r. o tym "
                 f"przedmiocie („{tekst}”) — mogła zostać uchylona. Sprawdź adres Dz.U.; "
