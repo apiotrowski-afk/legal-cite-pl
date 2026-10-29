@@ -1723,6 +1723,90 @@ async def _akt_z_tytulu(tekst: str) -> dict | str | None:
             f"Wskaż akt adresem Dz.U., np. 'art. 1 Dz.U. {kand[0]['year']} poz. {kand[0]['pos']}'.")
 
 
+# --- Rozporządzenie po tytule (wyszukiwarka ELI) ---
+# „rozporządzenia Ministra Sprawiedliwości z dnia 22 października 2015 r. w sprawie opłat
+# za czynności adwokackie”. Obowiązujących rozporządzeń jest ponad 20 tys., więc zamiast
+# katalogu pytamy wyszukiwarkę ELI fragmentem tytułu („w sprawie …”). Przechodzi tylko
+# rozporządzenie o identycznym przedmiocie, nie zmieniające; data i organ z cytatu,
+# jeśli są, muszą się zgadzać. Kilka obowiązujących trafień — odmowa z kandydatami.
+_MIES_PREFIKSY = ("stycz", "lut", "mar", "kwie", "maj", "czerw", "lip", "sierp", "wrze", "paźdz", "listop", "grud")
+_ROZP_RE = re.compile(r'^rozporządze\w*\s+(?P<organ>.*?)\s*(?:z\s+dnia\s+(?P<dzien>\d{1,2})\s+(?P<mies>\S+)\s+'
+                      r'(?P<rok>\d{4})\s*r?\.?\s*)?w\s+sprawie\s+(?P<przedmiot>.+)$', re.IGNORECASE)
+_rozporzadzenia: dict[str, tuple[float, dict | str | None]] = {}
+
+
+def _norm_tyt(t: str) -> str:
+    return re.sub(r'[\s„”"«».,;:]+', ' ', (t or "").lower()).strip()
+
+
+def _data_tytulu(dzien: str, mies: str, rok: str) -> tuple[int, int, int] | None:
+    m = next((i + 1 for i, p in enumerate(_MIES_PREFIKSY) if mies.lower().startswith(p)), None)
+    return (int(rok), m, int(dzien)) if m else None
+
+
+async def _rozporzadzenie_z_tytulu(tekst: str) -> dict | str | None:
+    t = re.sub(r'\s+', ' ', tekst or "").strip().rstrip('.')
+    m = _ROZP_RE.match(t)
+    if not m:
+        return None
+    klucz = t.lower()
+    if klucz in _rozporzadzenia and time.time() - _rozporzadzenia[klucz][0] < _KATALOG_TTL:
+        return _rozporzadzenia[klucz][1]
+    przedmiot = _norm_tyt(re.split(r'\s*\(Dz\.\s*U\.', m.group("przedmiot"))[0])
+    data = m.group("rok") and _data_tytulu(m.group("dzien"), m.group("mies"), m.group("rok"))
+    organ = [w[:5] for w in _norm_tyt(m.group("organ")).split() if len(w) > 2]
+    # do wyszukiwarki tylko początek przedmiotu bez znaków specjalnych („1,5%” — % działa
+    # w ELI jak symbol wieloznaczny i zapytanie nie trafia); pełne porównanie niżej
+    zapytanie = re.split(r'[^\w\s]', m.group("przedmiot"))[0].strip()[:150]
+    if len(zapytanie) < 12:
+        zapytanie = " ".join(w for w in m.group("przedmiot").split() if w.isalpha())[:150]
+    items, off = [], 0
+    async with httpx.AsyncClient(timeout=60, headers=_HEADERS) as c:
+        while True:
+            r = await c.get("https://api.sejm.gov.pl/eli/acts/search", params={
+                "publisher": "DU", "type": "Rozporządzenie", "title": zapytanie,
+                "limit": 500, "offset": off})
+            r.raise_for_status()
+            it = r.json().get("items", [])
+            items += it
+            if len(it) < 500 or off > 5000:
+                break
+            off += 500
+    pasuje = []
+    for x in items:
+        tyt = re.sub(r'\s+', ' ', x.get("title") or "").strip()
+        mt = re.match(r'Rozporządzenie\s+(?P<organ>.*?)\s+z dnia\s+(?P<dzien>\d{1,2})\s+(?P<mies>\S+)\s+'
+                      r'(?P<rok>\d{4})\s*r\.\s*w sprawie\s+(?P<przedmiot>.+)$', tyt.rstrip('.'))
+        if not mt or _norm_tyt(mt.group("przedmiot")) != przedmiot:
+            continue
+        if data and _data_tytulu(mt.group("dzien"), mt.group("mies"), mt.group("rok")) != data:
+            continue
+        organ_x = [w[:5] for w in _norm_tyt(mt.group("organ")).split() if len(w) > 2]
+        if organ and organ != organ_x:
+            continue
+        pasuje.append(x)
+    obow = [x for x in pasuje if x.get("inForce") == "IN_FORCE" or x.get("status") in (
+        "obowiązujący", "akt posiada tekst jednolity")]
+    if len(obow) == 1:
+        x = obow[0]
+        wynik = await _akt_z_adresu(f"DU/{x['year']}/{x['pos']}")
+    elif len(obow) > 1:
+        lista = "; ".join(f"{x['title'][:120]} — Dz.U. {x['year']} poz. {x['pos']}" for x in obow[:5])
+        wynik = (f"❌ Kilka obowiązujących rozporządzeń pasuje do „{t}”: {lista}. Podaj datę rozporządzenia "
+                 f"albo adres Dz.U., np. '§ 1 Dz.U. {obow[0]['year']} poz. {obow[0]['pos']}'.")
+    elif pasuje:
+        lista = "; ".join(f"{x['title'][:100]} — Dz.U. {x['year']} poz. {x['pos']} ({x.get('status')})"
+                          for x in pasuje[:3])
+        wynik = (f"❌ Rozporządzenie „{t}” nie obowiązuje: {lista}. Narzędzie podaje brzmienie "
+                 f"obowiązujących aktów; brzmienie z dawnego dnia poda verify_article z na_dzien "
+                 f"i adresem Dz.U.")
+    else:
+        wynik = (f"❌ Nie znalazłem w ELI rozporządzenia o tytule „{t}” (przedmiot, data i organ muszą "
+                 f"się zgadzać z tytułem). Sprawdź tytuł albo wskaż adres Dz.U.")
+    _rozporzadzenia[klucz] = (time.time(), wynik)
+    return wynik
+
+
 # --- Dowolny akt UE (numer, CELEX, traktaty) ---
 # „dyrektywy 93/13/EWG”, „rozporządzenia (WE) nr 593/2008”, „rozporządzenia 2016/679”,
 # „decyzji 2011/753/UE”, „CELEX 32019L0770”, „TFUE”, „Karty praw podstawowych”.
@@ -2030,6 +2114,11 @@ async def verify_article(citation: str) -> str:
         info = await _akt_z_adresu(act)
     except httpx.HTTPError:
         return f"❌ Nie udało się pobrać metadanych aktu {act} z api.sejm.gov.pl"
+    if info is None:
+        try:
+            info = await _rozporzadzenie_z_tytulu(act)
+        except httpx.HTTPError:
+            return f"❌ Nie udało się przeszukać rozporządzeń w api.sejm.gov.pl"
     if info is None:
         try:
             info = await _akt_z_tytulu(act)
