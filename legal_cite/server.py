@@ -43,6 +43,11 @@ async def verify_article(citation: str, na_dzien: str | None = None) -> str:
     'art. 5 Dz.U. 2024 poz. 1061', 'art. 2 Dz. U. z 2025 r. poz. 644', 'art. 1 DU/2018/723'.
     Ustawę można też wskazać tytułem ('art. 9 ustawy o ochronie konkurencji i konsumentów').
     Rozporządzenie — paragrafem i adresem Dz.U.: '§ 2 ust. 1 Dz.U. 2025 poz. 1899'.
+    Dowolny akt UE — rodzajem i numerem albo CELEX-em: 'art. 6 ust. 1 dyrektywy 93/13/EWG',
+    'art. 4 rozporządzenia (WE) nr 593/2008', 'art. 5 rozporządzenia 2016/679',
+    'art. 2 decyzji 2011/753/UE', 'art. 1 CELEX 32019L0770'; traktaty i Karta:
+    'art. 267 TFUE', 'art. 4 ust. 3 TUE', 'art. 47 Karty praw podstawowych'.
+    Akt UE niejednoznaczny, nieobowiązujący albo bez wersji polskiej — odmowa.
     na_dzien (RRRR-MM-DD, tylko akty PL): brzmienie obowiązujące w tym dniu —
     z tekstu jednolitego sprzed tego dnia i kolejnego, z wykazem nowelizacji;
     „Ustalenie:” mówi, czy brzmienie jest potwierdzone, ustalone z treści

@@ -13,6 +13,7 @@ import datetime as _dt
 import html as _html
 import re
 import time
+from urllib.parse import quote as _quote
 
 import logging
 import httpx
@@ -473,7 +474,8 @@ async def _fetch_eu(info: dict) -> str | None:
     treści. Blokada nie jest stała: na tym samym kliencie potrafi włączyć się
     w ciągu dnia, więc nie da się jej obejść retrajem ani nagłówkiem. CELLAR
     to interfejs maszynowy Urzędu Publikacji z negocjacją treści — ten sam
-    dokument, bez bramki dla przeglądarek. `info['celex']` może być CELEX-em
+    dokument, bez bramki dla przeglądarek (najpierw XHTML, potem HTML starego
+    formatu — jedyny tekst aktów z polskiego wydania specjalnego). `info['celex']` może być CELEX-em
     wersji skonsolidowanej (0…-RRRRMMDD).
     """
     key = f"EU:{info['celex']}"
@@ -482,8 +484,13 @@ async def _fetch_eu(info: dict) -> str | None:
 
     zrodla = (
         ("CELLAR",
-         f"http://publications.europa.eu/resource/celex/{info['celex']}",
+         f"http://publications.europa.eu/resource/celex/{_quote(info['celex'], safe='')}",
          {**_HEADERS, "Accept": "application/xhtml+xml", "Accept-Language": "pl"}),
+        # akty sprzed 1.05.2004 r. z polskiego wydania specjalnego nie mają XHTML,
+        # tylko HTML w starym formacie EUR-Lexu (pełny tekst polski) i PDF
+        ("CELLAR",
+         f"http://publications.europa.eu/resource/celex/{_quote(info['celex'], safe='')}",
+         {**_HEADERS, "Accept": "text/html", "Accept-Language": "pl"}),
         ("EUR-Lex",
          f"https://eur-lex.europa.eu/legal-content/PL/TXT/HTML/?uri=CELEX:{info['celex']}",
          _HEADERS),
@@ -495,8 +502,11 @@ async def _fetch_eu(info: dict) -> str | None:
                 resp = await c.get(url)
         except httpx.HTTPError:
             continue
-        # 202 = bramka WAF EUR-Lexu zwracająca stronę-wyzwanie zamiast aktu
-        if resp.status_code != 200 or len(resp.text) < 10_000:
+        # 202 = bramka WAF EUR-Lexu zwracająca stronę-wyzwanie zamiast aktu; próg długości
+        # tylko dla EUR-Lexu — CELLAR nie ma WAF-u, a krótkie akty (rejestracja nazwy,
+        # 6–7 tys. znaków) są prawdziwe
+        prog = 10_000 if nazwa == "EUR-Lex" else 1_000
+        if resp.status_code != 200 or len(resp.text) < prog:
             logger.info("zrodlo=%s celex=%s http=%s dlugosc=%s — probuje dalej",
                         nazwa, info["celex"], resp.status_code, len(resp.text))
             continue
@@ -1195,16 +1205,19 @@ def extract_pl_article(text: str, art: str, ustep: str | None) -> str | None:
 # Granice artykułu w akcie UE poza następnym „Artykuł N": nagłówki struktury
 # (ROZDZIAŁ/SEKCJA/TYTUŁ/ZAŁĄCZNIK — wielkie litery, żeby „tytuł prawny" w treści
 # nie ucinał) i formuła końcowa aktu przed podpisami i przypisami.
-_EU_BREAK = r'\b(?:ROZDZIAŁ|SEKCJA|TYTUŁ|ZAŁĄCZNIK)\b|\bSporządzono w\b'
+_EU_BREAK = r'\b(?:ROZDZIAŁ|SEKCJA|TYTUŁ|ZAŁĄCZNIK|PROTOKÓŁ|PROTOKOŁY|DEKLARACJE)\b|\bSporządzono w\b'
+# nagłówek artykułu aktu UE: „Artykuł 101”, nie odesłanie „(dawny artykuł 81 TWE)”
+# ani „artykuł 5” w tekście — wielka litera, bez „dawny ” i nawiasu przed
+_NAGLOWEK_ART_EU = r'(?<!dawny )(?<!\()\bArtykuł\s+'
 
 
 def extract_eu_article(text: str, art: str, ustep: str | None) -> str | None:
-    m = re.search(rf'\bArtykuł\s+{re.escape(art)}\b', text, re.IGNORECASE)
+    m = re.search(rf'{_NAGLOWEK_ART_EU}{re.escape(art)}(?![\w])', text)
     if not m:
         return None
     rest = text[m.end():]
     ends = [x.start() for x in (
-        re.search(r'\bArtykuł\s+\d+\b', rest, re.IGNORECASE),
+        re.search(rf'{_NAGLOWEK_ART_EU}\d+[a-z]?(?![\w])', rest),
         re.search(_EU_BREAK, rest),
     ) if x]
     end = m.end() + min(ends) if ends else min(m.start() + 5000, len(text))
@@ -1711,6 +1724,160 @@ async def _akt_z_tytulu(tekst: str) -> dict | str | None:
             f"Wskaż akt adresem Dz.U., np. 'art. 1 Dz.U. {kand[0]['year']} poz. {kand[0]['pos']}'.")
 
 
+# --- Dowolny akt UE (numer, CELEX, traktaty) ---
+# „dyrektywy 93/13/EWG”, „rozporządzenia (WE) nr 593/2008”, „rozporządzenia 2016/679”,
+# „decyzji 2011/753/UE”, „CELEX 32019L0770”, „TFUE”, „Karty praw podstawowych”.
+# Z numeru powstaje kilku kandydatów CELEX (kolejność rok/numer zależy od typu
+# i epoki: dyrektywy rok/numer, rozporządzenia do 2014 numer/rok, od 2015 rok/numer).
+# Kandydat przechodzi tylko wtedy, gdy CELLAR zna go jako akt tego typu, a polski
+# tytuł zawiera numer w zapisie z cytatu. Dwa trafienia albo zero — odmowa. Nie zgadujemy.
+_TRAKTATY_UE = (
+    (r'tfue|tfeu|traktat\w*\s+o\s+funkcjonowaniu\s+unii(?:\s+europejskiej)?', "12016E/TXT",
+     "Traktat o funkcjonowaniu Unii Europejskiej"),
+    (r'tue|teu|traktat\w*\s+o\s+unii\s+europejskiej', "12016M/TXT",
+     "Traktat o Unii Europejskiej"),
+    (r'kpp(?:\s*ue)?|kart\w*\s+praw\s+podstawowych(?:\s+unii(?:\s+europejskiej)?|\s+ue)?', "12016P/TXT",
+     "Karta praw podstawowych Unii Europejskiej"),
+)
+_TYP_UE = (("rozporządz", "R", "REG"), ("dyrektyw", "L", "DIR"),
+           ("decyzji ramowej", "F", "DEC"), ("decyzja ramowa", "F", "DEC"), ("decyzj", "D", "DEC"))
+_NUMER_UE_RE = re.compile(r'(?<![\d/])(\d{2,4})\s*/\s*(\d{1,4})(?![\d])')
+_CELEX_RE = re.compile(r'(?:celex[:\s]*)?\b([0-9]\d{4}[A-Z]{1,2}\d{4})\b', re.IGNORECASE)
+_akty_ue: dict[str, tuple[float, dict | str]] = {}
+
+
+def _rok_ue(r: str) -> int | None:
+    n = int(r)
+    if len(r) == 4:
+        return n if 1952 <= n <= _dt.date.today().year else None
+    if len(r) == 2:
+        return 1900 + n if n >= 52 else 2000 + n
+    return None
+
+
+def _kandydaci_celex(sektor: str, a: str, b: str) -> list[str]:
+    """Numer „a/b” z cytatu → kandydaci CELEX (rok, numer) bez powtórzeń."""
+    pary = []
+    if sektor == "R":
+        # od 2015 r. rok/numer („2016/679”), wcześniej numer/rok („593/2008”, „1408/71”)
+        pary += [(b, a), (a, b)] if not (len(a) == 4 and int(a) >= 2015) else [(a, b), (b, a)]
+    else:
+        pary += [(a, b), (b, a)]
+    out = []
+    for rok, nr in pary:
+        r = _rok_ue(rok)
+        if r and len(nr) <= 4:
+            c = f"3{r}{sektor}{int(nr):04d}"
+            if c not in out:
+                out.append(c)
+    return out
+
+
+def _nazwa_ue(tytul: str) -> str:
+    """Pełny tytuł z CELLAR → nazwa do nagłówka (rodzaj, numer, data, przedmiot ≤ 90 zn.)."""
+    t = re.sub(r'\s+', ' ', tytul).strip().rstrip('.')
+    # „2011/753/UE: Decyzja Komisji …” — numer przed dwukropkiem powtarza się w tytule
+    t = re.sub(r'^\d{2,4}/\d{1,4}/[A-ZĄĆĘŁŃÓŚŹŻ]+:\s*', '', t)
+    m = re.match(r'(.+? z dnia \d{1,2} \S+ \d{4} r\.)\s*(.*)', t)
+    if not m:
+        return t[:160]
+    glowa, reszta = m.group(1), m.group(2)
+    reszta = re.split(r'\s*\((?:Tekst mający znaczenie dla EOG|Dz\.U\.)', reszta)[0]
+    return glowa + (" " + (reszta if len(reszta) <= 90 else reszta[:90].rsplit(' ', 1)[0] + " …")
+                    if reszta else "")
+
+
+async def _metadane_ue(celexy: list[str]) -> dict[str, dict]:
+    if not celexy:
+        return {}
+    lista = ",".join(f'"{c}"' for c in celexy)
+    wiersze = await _sparql(
+        "PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>\n"
+        "SELECT ?celex ?title ?inforce ?type WHERE { ?w cdm:resource_legal_id_celex ?celex . "
+        f"FILTER(STR(?celex) IN ({lista})) "
+        "OPTIONAL { ?w cdm:resource_legal_in-force ?inforce } "
+        "OPTIONAL { ?w cdm:work_has_resource-type ?type } "
+        "OPTIONAL { ?e cdm:expression_belongs_to_work ?w ; cdm:expression_title ?title ; "
+        "cdm:expression_uses_language <http://publications.europa.eu/resource/authority/language/POL> } }")
+    out: dict[str, dict] = {}
+    for w in wiersze:
+        d = out.setdefault(w["celex"], {"tytul": "", "obowiazuje": None, "typy": set()})
+        # tytuły CELLAR mają twarde spacje („1985\xa0r.”) — jeden zwykły odstęp
+        d["tytul"] = d["tytul"] or re.sub(r'\s+', ' ', w.get("title", "")).strip()
+        if w.get("inforce") in ("1", "true"):
+            d["obowiazuje"] = True
+        elif w.get("inforce") in ("0", "false") and d["obowiazuje"] is None:
+            d["obowiazuje"] = False
+        if w.get("type"):
+            d["typy"].add(w["type"].rsplit("/", 1)[-1])
+    return out
+
+
+def _wynik_ue(celex: str, meta: dict, nazwa: str | None = None) -> dict | str:
+    if not meta.get("tytul") and not nazwa:
+        return (f"❌ Akt CELEX {celex} nie ma w CELLAR polskiej wersji językowej (akty sprzed "
+                f"1.05.2004 r. spoza polskiego wydania specjalnego Dz.U. UE) — narzędzie podaje "
+                f"tylko tekst polski.")
+    if meta.get("obowiazuje") is False:
+        return (f"❌ {nazwa or _nazwa_ue(meta['tytul'])} (CELEX {celex}) wg CELLAR nie obowiązuje "
+                f"— narzędzie podaje brzmienie obowiązujących aktów.")
+    return dict(celex=celex, name=nazwa or _nazwa_ue(meta["tytul"]) or f"CELEX {celex}")
+
+
+async def _akt_ue_z_cytatu(tekst: str) -> dict | str | None:
+    """Słownik aktu UE (jak w EU_ACTS), komunikat odmowy (str) albo None,
+    gdy tekst nie wskazuje aktu UE."""
+    t = re.sub(r'\s+', ' ', tekst or "").strip().rstrip('.')
+    nisko = t.lower()
+    klucz = nisko
+    if klucz in _akty_ue and time.time() - _akty_ue[klucz][0] < _KATALOG_TTL:
+        return _akty_ue[klucz][1]
+
+    wynik: dict | str | None = None
+    for wzor, celex, nazwa in _TRAKTATY_UE:
+        if re.fullmatch(rf'(?:art\.\s*)?{wzor}(?:\s*\(.*\))?', nisko):
+            wynik = dict(celex=celex, name=nazwa)
+            break
+    if wynik is None and (m := _CELEX_RE.search(t)):
+        celex = m.group(1).upper()
+        meta = (await _metadane_ue([celex])).get(celex)
+        wynik = (_wynik_ue(celex, meta) if meta
+                 else f"❌ CELLAR nie zna aktu o numerze CELEX {celex}.")
+    if wynik is None:
+        typ = next(((sek, cd) for slowo, sek, cd in _TYP_UE if slowo in nisko), None)
+        num = _NUMER_UE_RE.search(t)
+        # „rozporządzenia … Dz.U. 2025 poz. 1899” to akt polski — ten tor go nie bierze
+        if typ and num and not _ADRES_DZU_RE.search(t):
+            sektor, kod_typu = typ
+            a, b = num.group(1), num.group(2)
+            kand = _kandydaci_celex(sektor, a, b)
+            meta = await _metadane_ue(kand)
+            zapis = re.compile(rf'(?<![\d/]){re.escape(a)}/{re.escape(b)}(?![\d])')
+            trafione = [c for c in kand if c in meta
+                        and any(x.startswith(kod_typu) for x in meta[c]["typy"])
+                        and zapis.search(meta[c]["tytul"] or "")]
+            if not trafione:
+                # stare polskie tytuły dyrektyw nie mają numeru („Dyrektywa Rady z dnia
+                # 25 lipca 1985 r. …” = 85/374/EWG): wtedy jedyny kandydat tego rodzaju,
+                # którego rok z CELEX-u to rok przyjęcia w tytule
+                trafione = [c for c in kand if c in meta
+                            and any(x.startswith(kod_typu) for x in meta[c]["typy"])
+                            and re.search(rf'z dnia \d{{1,2}} \S+ {c[1:5]} r\.', meta[c]["tytul"] or "")]
+                trafione = trafione if len(trafione) == 1 else []
+            if len(trafione) == 1:
+                wynik = _wynik_ue(trafione[0], meta[trafione[0]])
+            elif len(trafione) > 1:
+                wynik = ("❌ Numer " + f"{a}/{b} wskazuje więcej niż jeden akt UE: "
+                         + "; ".join(f"{c} — {_nazwa_ue(meta[c]['tytul'])}" for c in trafione)
+                         + ". Podaj CELEX, np. 'art. 1 CELEX " + trafione[0] + "'.")
+            else:
+                wynik = (f"❌ Nie znalazłem w CELLAR aktu UE „{t}” (sprawdzone CELEX: "
+                         f"{', '.join(kand) or 'brak'}). Sprawdź rodzaj i numer aktu albo podaj CELEX.")
+    if wynik is not None:
+        _akty_ue[klucz] = (time.time(), wynik)
+    return wynik
+
+
 async def _odpowiedz_eu(info: dict, art: str, ustep: str | None, ref: str) -> str:
     """Artykuł aktu UE z najnowszej obowiązującej wersji skonsolidowanej, a gdy
     jej nie ma — z tekstu pierwotnego, z jawną informacją o zmianach."""
@@ -1725,7 +1892,8 @@ async def _odpowiedz_eu(info: dict, art: str, ustep: str | None, ref: str) -> st
         skons = False
         text = await _fetch_eu(info)
     if text is None:
-        return f"❌ Nie udało się pobrać {info['name']} z EUR-Lex"
+        return (f"❌ Nie udało się pobrać {info['name']} ani z CELLAR, ani z EUR-Lex (brak tekstu "
+                f"HTML w wersji polskiej albo chwilowa blokada EUR-Lexu)")
     celex = wersja["celex"] if skons else info["celex"]
     opis_wersji = (f"tekst skonsolidowany {celex}, stan na {wersja['data']:%d.%m.%Y}"
                    if skons else f"tekst pierwotny {celex}")
@@ -1737,7 +1905,8 @@ async def _odpowiedz_eu(info: dict, art: str, ustep: str | None, ref: str) -> st
     kody = sorted({k for k in _ZNACZNIK_EU_RE.findall(art_text) if k and k != "B"})
     result = re.sub(r' {2,}', ' ', _ZNACZNIK_EU_RE.sub(' ', art_text)).strip()
     if ustep:
-        result = _cut_ustep(result, ustep)
+        # bez „Artykuł N” na początku: inaczej „6 1.” wygląda jak indeks „§ 1 1.”
+        result = _cut_ustep(re.sub(r'^Artykuł\s+\S+\s*', '', result), ustep)
         if not result:
             return (f"❌ {ref} nie znaleziony w {info['name']} ({opis_wersji}). "
                     f"Sprawdź numer ustępu.")
@@ -1816,6 +1985,18 @@ async def verify_article(citation: str) -> str:
             return f"❌ Timeout pobierania {info['name']} z EUR-Lex"
 
     try:
+        info_ue = await _akt_ue_z_cytatu(act)
+    except httpx.HTTPError:
+        return f"❌ Nie udało się ustalić aktu UE „{act}” w CELLAR (Urząd Publikacji UE)"
+    if isinstance(info_ue, str):
+        return info_ue
+    if info_ue:
+        try:
+            return await _odpowiedz_eu(info_ue, art, ustep, ref)
+        except httpx.TimeoutException:
+            return f"❌ Timeout pobierania {info_ue['name']} z EUR-Lex"
+
+    try:
         info = await _akt_z_adresu(act)
     except httpx.HTTPError:
         return f"❌ Nie udało się pobrać metadanych aktu {act} z api.sejm.gov.pl"
@@ -1839,7 +2020,9 @@ async def verify_article(citation: str) -> str:
 
     known = ", ".join(dict.fromkeys(list(PL_ACTS) + list(EU_ACTS)))
     return (f"❌ Nieznany kod aktu: '{act}'\nObsługiwane: {known}\n"
-            f"Dowolną ustawę można wskazać adresem Dz.U., np. 'art. 5 Dz.U. 2024 poz. 1061'.")
+            f"Dowolną ustawę można wskazać adresem Dz.U., np. 'art. 5 Dz.U. 2024 poz. 1061', "
+            f"a akt UE numerem albo CELEX-em, np. 'art. 6 ust. 1 dyrektywy 93/13/EWG', "
+            f"'art. 4 rozporządzenia (WE) nr 593/2008', 'art. 267 TFUE', 'art. 1 CELEX 32019L0770'.")
 
 
 def list_acts() -> str:
