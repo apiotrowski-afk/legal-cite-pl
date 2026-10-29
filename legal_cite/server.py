@@ -48,7 +48,8 @@ async def verify_article(citation: str, na_dzien: str | None = None) -> str:
     'art. 2 decyzji 2011/753/UE', 'art. 1 CELEX 32019L0770'; traktaty i Karta:
     'art. 267 TFUE', 'art. 4 ust. 3 TUE', 'art. 47 Karty praw podstawowych'.
     Akt UE niejednoznaczny, nieobowiązujący albo bez wersji polskiej — odmowa.
-    na_dzien (RRRR-MM-DD, tylko akty PL): brzmienie obowiązujące w tym dniu —
+    na_dzien (RRRR-MM-DD): brzmienie obowiązujące w tym dniu. Akty UE — wersja
+    skonsolidowana obowiązująca w tym dniu (także akt już uchylony). Akty PL —
     z tekstu jednolitego sprzed tego dnia i kolejnego, z wykazem nowelizacji;
     „Ustalenie:” mówi, czy brzmienie jest potwierdzone, ustalone z treści
     nowelizacji, czy nieustalone (wtedy oba brzmienia). Także data przyszła."""

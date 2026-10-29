@@ -396,58 +396,57 @@ async def _sparql(zapytanie: str) -> list[dict]:
             for b in resp.json()["results"]["bindings"]]
 
 
-async def _wersja_eu(celex: str) -> dict:
-    """Ustala, z której wersji aktu UE cytować.
+async def _wersja_eu(celex: str, dzien: _dt.date | None = None) -> dict:
+    """Ustala, z której wersji aktu UE cytować — na dziś albo na wskazany dzień.
 
     CELEX 3… to tekst pierwotny z Dz.U. UE — bez późniejszych zmian (AI Act:
     brak art. 111 ust. 4 dodanego rozporządzeniem 2026/1744). Wersje
     skonsolidowane mają CELEX 0…-RRRRMMDD (data, od której obowiązuje dana
-    wersja). Bierzemy najnowszą obowiązującą dziś i osobno wypisujemy akty
-    zmieniające, które weszły w życie po jej dacie — konsolidacja bywa
+    wersja). Bierzemy najnowszą obowiązującą w danym dniu i osobno wypisujemy
+    akty zmieniające, które weszły w życie po jej dacie — konsolidacja bywa
     spóźniona względem zmian.
     """
+    dzien = dzien or _dt.date.today()
     teraz = time.time()
     if celex in _wersje_eu and teraz - _wersje_eu[celex][0] < _WERSJE_EU_TTL:
-        return _wersje_eu[celex][1]
-    dzis = _dt.date.today()
-    prefiks = "0" + celex[1:] + "-"
-    try:
-        kons = await _sparql(
-            "PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>\n"
-            "SELECT DISTINCT ?celex WHERE { ?w cdm:resource_legal_id_celex ?celex . "
-            f'FILTER(STRSTARTS(STR(?celex), "{prefiks}")) }}')
-        zmiany = await _sparql(
-            "PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>\n"
-            "SELECT DISTINCT ?celex ?eif WHERE { ?a cdm:resource_legal_amends_resource_legal ?b . "
-            f'?b cdm:resource_legal_id_celex ?bc . FILTER(STR(?bc) = "{celex}") '
-            "?a cdm:resource_legal_id_celex ?celex . "
-            "OPTIONAL { ?a cdm:resource_legal_date_entry-into-force ?eif } }")
-    except (httpx.HTTPError, KeyError, ValueError) as e:
-        logger.info("sparql celex=%s blad=%s", celex, type(e).__name__)
-        return {"celex": celex, "data": None, "blad": True, "zmieniajace": []}
-
-    daty = []
-    for k in kons:
-        m = re.fullmatch(re.escape(prefiks) + r"(\d{8})", k["celex"])
-        if m:
-            d = _dt.datetime.strptime(m.group(1), "%Y%m%d").date()
-            if d <= dzis:
-                daty.append((d, k["celex"]))
-    zmieniajace = []
-    for z in zmiany:
-        try:
-            eif = _dt.date.fromisoformat(z.get("eif", "")[:10])
-        except ValueError:
-            eif = None
-        zmieniajace.append((z["celex"], eif))
-    if daty:
-        data, wybrany = max(daty)
+        surowe = _wersje_eu[celex][1]
     else:
-        data, wybrany = None, celex
-    wersja = {"celex": wybrany, "data": data, "blad": False,
-              "zmieniajace": sorted(set(zmieniajace), key=lambda x: (x[1] or dzis, x[0]))}
-    _wersje_eu[celex] = (teraz, wersja)
-    return wersja
+        prefiks = "0" + celex[1:] + "-"
+        try:
+            kons = await _sparql(
+                "PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>\n"
+                "SELECT DISTINCT ?celex WHERE { ?w cdm:resource_legal_id_celex ?celex . "
+                f'FILTER(STRSTARTS(STR(?celex), "{prefiks}")) }}')
+            zmiany = await _sparql(
+                "PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>\n"
+                "SELECT DISTINCT ?celex ?eif WHERE { ?a cdm:resource_legal_amends_resource_legal ?b . "
+                f'?b cdm:resource_legal_id_celex ?bc . FILTER(STR(?bc) = "{celex}") '
+                "?a cdm:resource_legal_id_celex ?celex . "
+                "OPTIONAL { ?a cdm:resource_legal_date_entry-into-force ?eif } }")
+        except (httpx.HTTPError, KeyError, ValueError) as e:
+            logger.info("sparql celex=%s blad=%s", celex, type(e).__name__)
+            return {"celex": celex, "data": None, "blad": True, "zmieniajace": []}
+        wersje = []
+        for k in kons:
+            m = re.fullmatch(re.escape(prefiks) + r"(\d{8})", k["celex"])
+            if m:
+                wersje.append((_dt.datetime.strptime(m.group(1), "%Y%m%d").date(), k["celex"]))
+        zmieniajace = []
+        for z in zmiany:
+            try:
+                eif = _dt.date.fromisoformat(z.get("eif", "")[:10])
+            except ValueError:
+                eif = None
+            zmieniajace.append((z["celex"], eif))
+        surowe = {"wersje": sorted(set(wersje)),
+                  "zmieniajace": sorted(set(zmieniajace),
+                                        key=lambda x: (x[1] or _dt.date.max, x[0]))}
+        _wersje_eu[celex] = (teraz, surowe)
+    daty = [w for w in surowe["wersje"] if w[0] <= dzien]
+    data, wybrany = max(daty) if daty else (None, celex)
+    nastepna = next((d for d, _ in surowe["wersje"] if d > dzien), None)
+    return {"celex": wybrany, "data": data, "blad": False, "nastepna": nastepna,
+            "zmieniajace": surowe["zmieniajace"]}
 
 
 # znaczniki tekstu skonsolidowanego: ▼B / ►M1 … ◄ (B = akt podstawowy,
@@ -1793,15 +1792,27 @@ async def _metadane_ue(celexy: list[str]) -> dict[str, dict]:
     lista = ",".join(f'"{c}"' for c in celexy)
     wiersze = await _sparql(
         "PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>\n"
-        "SELECT ?celex ?title ?inforce ?type WHERE { ?w cdm:resource_legal_id_celex ?celex . "
+        "SELECT ?celex ?title ?inforce ?type ?eif ?eov WHERE { ?w cdm:resource_legal_id_celex ?celex . "
         f"FILTER(STR(?celex) IN ({lista})) "
         "OPTIONAL { ?w cdm:resource_legal_in-force ?inforce } "
+        "OPTIONAL { ?w cdm:resource_legal_date_entry-into-force ?eif } "
+        "OPTIONAL { ?w cdm:resource_legal_date_end-of-validity ?eov } "
         "OPTIONAL { ?w cdm:work_has_resource-type ?type } "
         "OPTIONAL { ?e cdm:expression_belongs_to_work ?w ; cdm:expression_title ?title ; "
         "cdm:expression_uses_language <http://publications.europa.eu/resource/authority/language/POL> } }")
     out: dict[str, dict] = {}
     for w in wiersze:
-        d = out.setdefault(w["celex"], {"tytul": "", "obowiazuje": None, "typy": set()})
+        d = out.setdefault(w["celex"], {"tytul": "", "obowiazuje": None, "typy": set(),
+                                        "od": None, "do": None})
+        for pole, klucz in (("eif", "od"), ("eov", "do")):
+            try:
+                x = _dt.date.fromisoformat((w.get(pole) or "")[:10])
+            except ValueError:
+                continue
+            # kilka dat wejścia w życie (przepisy stosowane etapami) — najwcześniejsza;
+            # kilka dat utraty mocy — najpóźniejsza
+            if d[klucz] is None or (x < d[klucz] if klucz == "od" else x > d[klucz]):
+                d[klucz] = x
         # tytuły CELLAR mają twarde spacje („1985\xa0r.”) — jeden zwykły odstęp
         d["tytul"] = d["tytul"] or re.sub(r'\s+', ' ', w.get("title", "")).strip()
         if w.get("inforce") in ("1", "true"):
@@ -1813,23 +1824,34 @@ async def _metadane_ue(celexy: list[str]) -> dict[str, dict]:
     return out
 
 
-def _wynik_ue(celex: str, meta: dict, nazwa: str | None = None) -> dict | str:
+def _wynik_ue(celex: str, meta: dict, nazwa: str | None = None,
+              dzien: _dt.date | None = None) -> dict | str:
+    if dzien:
+        n = nazwa or _nazwa_ue(meta.get("tytul") or "") or f"CELEX {celex}"
+        if meta.get("od") and dzien < meta["od"]:
+            return (f"❌ {n} (CELEX {celex}) wszedł w życie {meta['od']:%d.%m.%Y} — "
+                    f"{dzien:%d.%m.%Y} jeszcze nie obowiązywał.")
+        if meta.get("do") and meta["do"].year < 9999 and dzien > meta["do"]:
+            return (f"❌ {n} (CELEX {celex}) obowiązywał do {meta['do']:%d.%m.%Y} — "
+                    f"{dzien:%d.%m.%Y} już nie obowiązywał.")
     if not meta.get("tytul") and not nazwa:
         return (f"❌ Akt CELEX {celex} nie ma w CELLAR polskiej wersji językowej (akty sprzed "
                 f"1.05.2004 r. spoza polskiego wydania specjalnego Dz.U. UE) — narzędzie podaje "
                 f"tylko tekst polski.")
-    if meta.get("obowiazuje") is False:
-        return (f"❌ {nazwa or _nazwa_ue(meta['tytul'])} (CELEX {celex}) wg CELLAR nie obowiązuje "
-                f"— narzędzie podaje brzmienie obowiązujących aktów.")
+    if meta.get("obowiazuje") is False and not dzien:
+        do = f" (obowiązywał do {meta['do']:%d.%m.%Y})" if meta.get("do") else ""
+        return (f"❌ {nazwa or _nazwa_ue(meta['tytul'])} (CELEX {celex}) wg CELLAR nie obowiązuje{do} "
+                f"— narzędzie podaje brzmienie obowiązujących aktów; brzmienie z dnia, w którym "
+                f"obowiązywał, poda verify_article z na_dzien.")
     return dict(celex=celex, name=nazwa or _nazwa_ue(meta["tytul"]) or f"CELEX {celex}")
 
 
-async def _akt_ue_z_cytatu(tekst: str) -> dict | str | None:
+async def _akt_ue_z_cytatu(tekst: str, dzien: _dt.date | None = None) -> dict | str | None:
     """Słownik aktu UE (jak w EU_ACTS), komunikat odmowy (str) albo None,
     gdy tekst nie wskazuje aktu UE."""
     t = re.sub(r'\s+', ' ', tekst or "").strip().rstrip('.')
     nisko = t.lower()
-    klucz = nisko
+    klucz = f"{nisko}|{dzien}"
     if klucz in _akty_ue and time.time() - _akty_ue[klucz][0] < _KATALOG_TTL:
         return _akty_ue[klucz][1]
 
@@ -1841,7 +1863,7 @@ async def _akt_ue_z_cytatu(tekst: str) -> dict | str | None:
     if wynik is None and (m := _CELEX_RE.search(t)):
         celex = m.group(1).upper()
         meta = (await _metadane_ue([celex])).get(celex)
-        wynik = (_wynik_ue(celex, meta) if meta
+        wynik = (_wynik_ue(celex, meta, dzien=dzien) if meta
                  else f"❌ CELLAR nie zna aktu o numerze CELEX {celex}.")
     if wynik is None:
         typ = next(((sek, cd) for slowo, sek, cd in _TYP_UE if slowo in nisko), None)
@@ -1859,13 +1881,15 @@ async def _akt_ue_z_cytatu(tekst: str) -> dict | str | None:
             if not trafione:
                 # stare polskie tytuły dyrektyw nie mają numeru („Dyrektywa Rady z dnia
                 # 25 lipca 1985 r. …” = 85/374/EWG): wtedy jedyny kandydat tego rodzaju,
-                # którego rok z CELEX-u to rok przyjęcia w tytule
+                # którego rok z CELEX-u to rok przyjęcia w tytule albo następny (87/102/EWG
+                # przyjęta 22.12.1986 r., numer z roku publikacji)
                 trafione = [c for c in kand if c in meta
                             and any(x.startswith(kod_typu) for x in meta[c]["typy"])
-                            and re.search(rf'z dnia \d{{1,2}} \S+ {c[1:5]} r\.', meta[c]["tytul"] or "")]
+                            and re.search(rf'z dnia \d{{1,2}} \S+ (?:{c[1:5]}|{int(c[1:5]) - 1}) r\.',
+                                          meta[c]["tytul"] or "")]
                 trafione = trafione if len(trafione) == 1 else []
             if len(trafione) == 1:
-                wynik = _wynik_ue(trafione[0], meta[trafione[0]])
+                wynik = _wynik_ue(trafione[0], meta[trafione[0]], dzien=dzien)
             elif len(trafione) > 1:
                 wynik = ("❌ Numer " + f"{a}/{b} wskazuje więcej niż jeden akt UE: "
                          + "; ".join(f"{c} — {_nazwa_ue(meta[c]['tytul'])}" for c in trafione)
@@ -1878,11 +1902,13 @@ async def _akt_ue_z_cytatu(tekst: str) -> dict | str | None:
     return wynik
 
 
-async def _odpowiedz_eu(info: dict, art: str, ustep: str | None, ref: str) -> str:
-    """Artykuł aktu UE z najnowszej obowiązującej wersji skonsolidowanej, a gdy
-    jej nie ma — z tekstu pierwotnego, z jawną informacją o zmianach."""
-    dzis = _dt.date.today()
-    wersja = await _wersja_eu(info["celex"])
+async def _odpowiedz_eu(info: dict, art: str, ustep: str | None, ref: str,
+                        dzien: _dt.date | None = None) -> str:
+    """Artykuł aktu UE z najnowszej wersji skonsolidowanej obowiązującej dziś
+    (albo we wskazanym dniu), a gdy jej nie ma — z tekstu pierwotnego, z jawną
+    informacją o zmianach."""
+    dzis = dzien or _dt.date.today()
+    wersja = await _wersja_eu(info["celex"], dzien)
     skons = wersja["celex"] != info["celex"]
     uwaga_pobrania = ""
     text = await _fetch_eu({**info, "celex": wersja["celex"]})
@@ -1928,7 +1954,10 @@ async def _odpowiedz_eu(info: dict, art: str, ustep: str | None, ref: str) -> st
                       + "nie wszedł w życie żaden akt zmieniający")
         akt_kod = "potwierdzona_wg_cellar"
     if przyszle:
-        aktualnosc += f". Zmiany jeszcze nieobowiązujące: {', '.join(przyszle)}"
+        aktualnosc += (f". Zmiany wchodzące w życie po {dzis:%d.%m.%Y}: " if dzien
+                       else ". Zmiany jeszcze nieobowiązujące: ") + ", ".join(przyszle)
+    if dzien:
+        aktualnosc = f"brzmienie na dzień {dzien:%d.%m.%Y} — " + aktualnosc
 
     skad = (_zrodlo.get(f"EU:{celex}") or ("EUR-Lex",))[0]
     if skons:
@@ -1948,7 +1977,8 @@ async def _odpowiedz_eu(info: dict, art: str, ustep: str | None, ref: str) -> st
             f"Aktualność: {aktualnosc}\n\n{result}\n\n"
             f"[dla modelu] zrodlo={'tekst_skonsolidowany' if skons else 'tekst_pierwotny_dz_u_ue'}; "
             f"wersja={celex}; aktualnosc={akt_kod}; cytuj_jako=„{cytuj}”; "
-            f"nie_nazywaj_tekstem_urzedowym={'tak' if skons else 'nie_dotyczy'}")
+            f"nie_nazywaj_tekstem_urzedowym={'tak' if skons else 'nie_dotyczy'}"
+            + (f"; na_dzien={dzien.isoformat()}" if dzien else ""))
 
 
 async def verify_article(citation: str) -> str:

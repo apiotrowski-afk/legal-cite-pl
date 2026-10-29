@@ -315,10 +315,33 @@ def _taki_sam(a: str, b: str) -> bool:
     return "".join(pdf_tj.tokeny(a)) == "".join(pdf_tj.tokeny(b))
 
 
+async def _akt_ue_na_dzien(act: str, dzien: _dt.date) -> dict | str | None:
+    """Akt UE z cytatu (kod ze słownika, numer, CELEX, traktat) sprawdzony pod kątem
+    obowiązywania we wskazanym dniu; None, gdy to nie akt UE."""
+    klucz = core._resolve(act, core.EU_ACTS)
+    if klucz:
+        info = core.EU_ACTS[klucz]
+        meta = (await core._metadane_ue([info["celex"]])).get(info["celex"], {})
+        return core._wynik_ue(info["celex"], meta, nazwa=info["name"], dzien=dzien)
+    return await core._akt_ue_z_cytatu(act, dzien)
+
+
 async def verify_article_na_dzien(citation: str, na_dzien: str) -> str:
     dzien = _data(na_dzien)
     if not dzien:
         return f"❌ Nierozpoznana data: '{na_dzien}'. Użyj formatu RRRR-MM-DD, np. 2018-07-01."
+    # Akty UE: wersja skonsolidowana obowiązująca w tym dniu (core._odpowiedz_eu)
+    pelny = core.parse_citation(citation)
+    if pelny:
+        try:
+            ue = await _akt_ue_na_dzien(pelny["act"], dzien)
+        except httpx.HTTPError:
+            return f"❌ Nie udało się ustalić aktu UE „{pelny['act']}” w CELLAR (Urząd Publikacji UE)"
+        if isinstance(ue, str):
+            return ue
+        if ue:
+            ref = f"art. {pelny['art']}" + (f" ust. {pelny['ustep']}" if pelny["ustep"] else "")
+            return await core._odpowiedz_eu(ue, pelny["art"], pelny["ustep"], ref, dzien)
     # Na dzień zwracamy zawsze cały artykuł, więc jednostkę odcinamy przed
     # parsowaniem (parser nie zna jednostek z indeksem górnym: „§ 1¹”).
     jednostka = re.search(r'\s(?:ust\.|§+|pkt|lit\.)\s*\S+(?:\s(?:pkt|lit\.)\s*\S+)*', citation)
@@ -329,9 +352,6 @@ async def verify_article_na_dzien(citation: str, na_dzien: str) -> str:
                 f"'art. 118 KC'.\nLista kodów: list_acts().")
     act, art = parsed["act"], parsed["art"]
     ustep = jednostka.group().strip() if jednostka else None
-    if core._resolve(act, core.EU_ACTS):
-        return ("❌ Brzmienie na dzień jest dostępne tylko dla aktów polskich; dla aktów UE "
-                "narzędzie podaje wyłącznie aktualną wersję skonsolidowaną.")
     pl_key = core._resolve(act, core.PL_ACTS)
     if pl_key:
         info = core.PL_ACTS[pl_key]

@@ -48,7 +48,9 @@ PRZYPADKI = [
      ("ustalone_uchylony",)),
     ("art. 15 u.ś.u.d.e.", "2026-12-01", ["UCHYLA art. 15"], [], ("ustalone_uchylony",)),
     ("art. 2 u.ś.u.d.e.", "2026-12-01", ["Dz.U. 2026 poz. 1296"], ["UCHYLA art. 2"], USTAL + ("nieustalone",)),
-    ("art. 6 RODO", "2020-01-01", ["tylko dla aktów polskich"], [], None),
+    # od 29.10.2026 akty UE też na dzień (wersja skonsolidowana obowiązująca w tym dniu)
+    ("art. 6 RODO", "2020-01-01", ["Zgodność przetwarzania z prawem", "brzmienie na dzień 01.01.2020"],
+     ["tylko dla aktów polskich"], [None]),
     ("art. 118 KC", "2018-13-45", ["Nierozpoznana data"], [], None),
     # bez znanej odpowiedzi — sprawdzamy, że narzędzie nie udaje pewności
     ("art. 385¹ § 1 KC", "2010-01-01", ["niedozwolone postanowienia"], [], USTAL + ("nieustalone",)),
