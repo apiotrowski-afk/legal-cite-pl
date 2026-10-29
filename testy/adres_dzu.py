@@ -17,7 +17,7 @@ def sprawdz(ok: bool, opis: str) -> None:
 
 def adres(t):
     m = core._ADRES_DZU_RE.search(t)
-    return m and ((m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4)))
+    return m and ((m.group("rok"), m.group("poz")) if m.group("rok") else (m.group("rok2"), m.group("poz2")))
 
 
 for t, oczek in [("Dz.U. 2024 poz. 1061", ("2024", "1061")), ("Dz. U. z 2024 r. poz. 1061", ("2024", "1061")),
@@ -25,6 +25,9 @@ for t, oczek in [("Dz.U. 2024 poz. 1061", ("2024", "1061")), ("Dz. U. z 2024 r. 
                  ("DU/2018/723", ("2018", "723")), ("ustawy z dnia 1 marca 2018 r. (Dz. U. z 2025 r. poz. 644)", ("2025", "644"))]:
     sprawdz(adres(t) == oczek, f"adres {t!r} → {oczek}")
 sprawdz(adres("ustawy o KRS") is None, "bez adresu → None")
+for t, oczek in [("M.P. 2022 poz. 990", ("2022", "990")), ("MP/1992/185", ("1992", "185")),
+                 ("M. P. z 2026 r. poz. 573", ("2026", "573"))]:
+    sprawdz(adres(t) == oczek, f"adres Monitora Polskiego {t!r} → {oczek}")
 
 
 async def main():

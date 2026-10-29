@@ -509,7 +509,8 @@ def wyjasnienia_warstwy(raw_tok: list[str], przypisy: dict[str, str], pos: str) 
     poczatek_bloku[n] = 1
     strony: list[int] = []              # pozycje nagłówków stron
     for k in range(n - 3):
-        if raw_tok[k] == "dziennik" and raw_tok[k + 1] == "ustaw":
+        # nagłówek strony: „Dziennik Ustaw – 3 – Poz. 795” albo „Monitor Polski – 3 – Poz. 573”
+        if (raw_tok[k], raw_tok[k + 1]) in (("dziennik", "ustaw"), ("monitor", "polski")):
             for q in range(k + 2, min(n - 1, k + 3 + _MAX_ROZSUNIECIE)):
                 if raw_tok[q] == "poz" and raw_tok[q + 1] == pos:
                     for x in (k, k + 1, q, q + 1):

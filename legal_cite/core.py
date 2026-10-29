@@ -67,6 +67,10 @@ PL_ACTS: dict[str, dict] = {
     "ustawy o cudzoziemcach": dict(pub="DU", year=2013, pos=1650, name="Ustawa o cudzoziemcach"),
     # nabywanie nieruchomości przez cudzoziemców: akt pierwotny Dz.U. 1920 nr 31 poz. 178 (ELI DU/1920/178),
     # t.j. Dz.U. 2017 poz. 2278 (HTML); nowela Dz.U. 2026 poz. 1099 w życie 19.11.2026 (sprawdzone w ELI 2026-10-24)
+    # Regulamin Sejmu: uchwała w Monitorze Polskim (MP/1992/185), t.j. tylko w PDF
+    "Regulamin Sejmu":   dict(pub="MP", year=1992, pos=185, name="Regulamin Sejmu Rzeczypospolitej Polskiej"),
+    "Regulaminu Sejmu":  dict(pub="MP", year=1992, pos=185, name="Regulamin Sejmu Rzeczypospolitej Polskiej"),
+    "r.S.":              dict(pub="MP", year=1992, pos=185, name="Regulamin Sejmu Rzeczypospolitej Polskiej"),
     "UNNC":     dict(pub="DU", year=1920, pos=178,  name="Ustawa o nabywaniu nieruchomości przez cudzoziemców"),
     "u.n.n.c.": dict(pub="DU", year=1920, pos=178,  name="Ustawa o nabywaniu nieruchomości przez cudzoziemców"),
     "ustawy o nabywaniu nieruchomości przez cudzoziemców": dict(pub="DU", year=1920, pos=178, name="Ustawa o nabywaniu nieruchomości przez cudzoziemców"),
@@ -311,7 +315,9 @@ def _nowelizacje_po(zmieniajace: list[dict], data: str,
 def _adres_dz_u(ident: str) -> str:
     """„DU/2026/507” → „Dz.U. 2026 poz. 507”."""
     cz = ident.split("/")
-    return f"Dz.U. {cz[1]} poz. {cz[2]}" if len(cz) == 3 and cz[0] == "DU" else ident
+    if len(cz) == 3 and cz[0] in ("DU", "MP"):
+        return f"{'Dz.U.' if cz[0] == 'DU' else 'M.P.'} {cz[1]} poz. {cz[2]}"
+    return ident
 
 
 def _data_pl(iso: str) -> str:
@@ -1567,8 +1573,13 @@ async def _odpowiedz_pdf(info: dict, tj: list[dict], art: str, ustep: str | None
 # Adres tekstu jednolitego (obwieszczenie) jest zamieniany na akt, którego dotyczy
 # („Tekst jednolity dla aktu” w ELI) — silnik pracuje na akcie pierwotnym.
 _ADRES_DZU_RE = re.compile(
-    r'(?i)\bDz\.?\s*U\.?\s*(?:z\s*)?(\d{4})\s*(?:r\.)?\s*,?\s*(?:nr\s*\d+\s*,?\s*)?poz\.?\s*(\d+)'
-    r'|\bDU/(\d{4})/(\d+)\b')
+    r'(?i)\b(?P<pub>Dz\.?\s*U|M\.?\s*P)\.?\s*(?:z\s*)?(?P<rok>\d{4})\s*(?:r\.)?\s*,?\s*(?:nr\s*\d+\s*,?\s*)?'
+    r'poz\.?\s*(?P<poz>\d+)'
+    r'|\b(?P<pub2>DU|MP)/(?P<rok2>\d{4})/(?P<poz2>\d+)\b')
+# akty czytane po adresie; umowy międzynarodowe ELI drukuje dwujęzycznie w dwóch kolumnach
+# (skan EKPCz po konwersji to przemieszane kolumny PL/EN) — odmowa zamiast niewiarygodnego odczytu
+_TYPY_Z_ADRESU = ("Ustawa", "Rozporządzenie", "Uchwała", "Zarządzenie", "Regulamin")
+_TYPY_UMOWY = ("Konwencja", "Umowa międzynarodowa", "Umowa", "Protokół", "Traktat", "Porozumienie", "Karta")
 _akty_z_adresu: dict[str, tuple[float, dict | str]] = {}
 
 
@@ -1578,15 +1589,20 @@ async def _akt_z_adresu(tekst: str) -> dict | str | None:
     m = _ADRES_DZU_RE.search(tekst or "")
     if not m:
         return None
-    rok, poz = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
-    ident = klucz = f"DU/{rok}/{poz}"
+    if m.group("rok"):
+        pub = "DU" if m.group("pub").lower().startswith("d") else "MP"
+        rok, poz = m.group("rok"), m.group("poz")
+    else:
+        pub, rok, poz = m.group("pub2").upper(), m.group("rok2"), m.group("poz2")
+    ident = klucz = f"{pub}/{rok}/{poz}"
     if klucz in _akty_z_adresu and time.time() - _akty_z_adresu[klucz][0] < _KATALOG_TTL:
         return _akty_z_adresu[klucz][1]
     base = "https://api.sejm.gov.pl/eli/acts"
     async with httpx.AsyncClient(follow_redirects=True, timeout=25, headers=_HEADERS) as c:
         r = await c.get(f"{base}/{ident}")
         if r.status_code == 404:
-            return f"❌ W Dzienniku Ustaw nie ma pozycji {_adres_dz_u(ident)} (API ELI: 404)."
+            return (f"❌ W {'Dzienniku Ustaw' if pub == 'DU' else 'Monitorze Polskim'} nie ma pozycji "
+                    f"{_adres_dz_u(ident)} (API ELI: 404).")
         r.raise_for_status()
         meta = r.json()
         dla = (meta.get("references") or {}).get("Tekst jednolity dla aktu") or []
@@ -1595,9 +1611,15 @@ async def _akt_z_adresu(tekst: str) -> dict | str | None:
             r = await c.get(f"{base}/{ident}")
             r.raise_for_status()
             meta = r.json()
-    if meta.get("type") not in ("Ustawa", "Rozporządzenie"):
+    if meta.get("type") in _TYPY_UMOWY:
+        wynik = (f"❌ {_adres_dz_u(ident)} to {(meta.get('type') or 'akt').lower()} "
+                 f"({(meta.get('title') or '')[:100]}). Umowy międzynarodowe są w ELI tylko jako PDF "
+                 f"drukowany dwujęzycznie w dwóch kolumnach — odczyt nie jest wiarygodny, więc narzędzie "
+                 f"go nie podaje. Wiążący jest PDF: https://api.sejm.gov.pl/eli/acts/{ident}/text.pdf")
+    elif meta.get("type") not in _TYPY_Z_ADRESU:
         wynik = (f"❌ {_adres_dz_u(ident)} to {(meta.get('type') or 'akt').lower()}. Po adresie "
-                 f"Dz.U. narzędzie obsługuje ustawy i rozporządzenia.")
+                 f"Dz.U. albo M.P. narzędzie obsługuje ustawy, rozporządzenia, uchwały, zarządzenia "
+                 f"i regulaminy.")
     elif (meta.get("entryIntoForce") or "") > _dt.date.today().isoformat() \
             or "oczekuj" in (meta.get("status") or ""):
         wynik = (f"❌ {_adres_dz_u(ident)} ({meta.get('title', '')[:120]}) jeszcze nie weszła "
@@ -1607,9 +1629,9 @@ async def _akt_z_adresu(tekst: str) -> dict | str | None:
         wynik = (f"❌ {_adres_dz_u(ident)} ({meta.get('title', '')[:120]}) ma w ELI status "
                  f"„{meta.get('status')}” — narzędzie podaje brzmienie obowiązujących ustaw.")
     else:
-        _, rok, poz = ident.split("/")
+        pub, rok, poz = ident.split("/")
         tytul = re.sub(r'\s+', ' ', meta.get("title") or ident).strip().rstrip('.')
-        wynik = dict(pub="DU", year=int(rok), pos=int(poz), name=tytul)
+        wynik = dict(pub=pub, year=int(rok), pos=int(poz), name=tytul)
     _akty_z_adresu[klucz] = (time.time(), wynik)
     return wynik
 
