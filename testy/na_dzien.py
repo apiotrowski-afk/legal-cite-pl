@@ -7,7 +7,8 @@ NIE MOŻE być, i dopuszczalne ustalenia. Zmiany prawa użyte w testach:
 - art. 36 § 1 k.p.: od 22.02.2016 także umowy na czas określony (Dz.U. 2015 poz. 1220);
 - art. 148 § 1 k.k.: od 1.10.2023 „od lat 10” zamiast „od lat 8”;
 - ustawa o prawach konsumenta: w życie od 25.12.2014;
-- art. 12–15 u.ś.u.d.e.: uchylone od 6.11.2026 (Dz.U. 2026 poz. 1296).
+- art. 12–15 u.ś.u.d.e.: uchylone od 6.11.2026 (Dz.U. 2026 poz. 1296);
+- p.w.p.: ta sama nowelizacja zmienia tylko art. 296 ust. 3 (art. 5 noweli), art. 28 i 236 bez zmian.
 
     python testy/na_dzien.py
 """
@@ -23,7 +24,7 @@ from legal_cite import na_dzien  # noqa: E402
 DZIS = __import__("datetime").date.today().isoformat()
 POTW = ("potwierdzone_brak_nowelizacji", "potwierdzone_identyczne_w_kolejnym_tj",
         "potwierdzone_kolejny_tj", "potwierdzone_brzmieniem_z_nowelizacji", "potwierdzone_brak_artykulu")
-USTAL = POTW + ("ustalone_z_tresci_nowelizacji",)
+USTAL = POTW + ("ustalone_z_tresci_nowelizacji", "ustalone_bez_zmian_z_tresci_nowelizacji")
 # (cytat, dzień, musi zawierać, nie może zawierać, dopuszczalne ustalenia; None = odmowa „❌”)
 PRZYPADKI = [
     ("art. 118 KC", "2018-07-08", ["lat dziesięć"], ["sześć lat"], POTW),
@@ -48,6 +49,13 @@ PRZYPADKI = [
      ("ustalone_uchylony",)),
     ("art. 15 u.ś.u.d.e.", "2026-12-01", ["UCHYLA art. 15"], [], ("ustalone_uchylony",)),
     ("art. 2 u.ś.u.d.e.", "2026-12-01", ["Dz.U. 2026 poz. 1296"], ["UCHYLA art. 2"], USTAL + ("nieustalone",)),
+    # 30.10.2026: nowela nie wymienia artykułu, a nowszego t.j. nie ma — było „nieustalone”
+    ("art. 236 ust. 1 ustawy - Prawo własności przemysłowej", "2026-12-01",
+     ["rzecznik patentowy", "Dz.U. 2026 poz. 1296"], [], ("ustalone_bez_zmian_z_tresci_nowelizacji",)),
+    ("art. 28 Dz.U. 2023 poz. 1170", "2026-12-01", ["programów komputerowych"], [],
+     ("ustalone_bez_zmian_z_tresci_nowelizacji",)),
+    ("art. 296 Dz.U. 2023 poz. 1170", "2026-12-01", ["Dz.U. 2026 poz. 1296", "wymienia art. 296"], [],
+     ("nieustalone", "ustalone_z_tresci_nowelizacji")),
     # od 29.10.2026 akty UE też na dzień (wersja skonsolidowana obowiązująca w tym dniu)
     ("art. 6 RODO", "2020-01-01", ["Zgodność przetwarzania z prawem", "brzmienie na dzień 01.01.2020"],
      ["tylko dla aktów polskich"], [None]),

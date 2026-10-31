@@ -51,5 +51,23 @@ sprawdz(kod == "potwierdzona_wg_wykazu_eli" and "nie weszła w życie żadna" in
 tekst, _, _ = core._aktualnosc_pl(zm[:1], "2019-12-31")
 sprawdz("weszła w życie 1 nowelizacja:" in tekst, "odmiana dla 1")
 
+# zmiana całej ustawy bez numerów artykułów — brak wzmianki o artykule nic nie dowodzi
+from legal_cite import na_dzien  # noqa: E402
+sprawdz(na_dzien._calosciowa("W ustawie z dnia 1 r. w całej ustawie wyrazy „X” zastępuje się wyrazami „Y”"),
+        "„w całej ustawie” — zmiana całościowa")
+sprawdz(na_dzien._calosciowa("użyte w ustawie wyrazy „X” zastępuje się"), "„użyte w ustawie”")
+sprawdz(na_dzien._calosciowa("dział II otrzymuje brzmienie:"), "nowe brzmienie działu")
+sprawdz(not na_dzien._calosciowa("w art. 296 w ust. 3 zdanie drugie otrzymuje brzmienie: „Przepisu nie stosuje się”"),
+        "zmiana jednego artykułu — nie całościowa")
+
+# segment nie kończy się na „Art. N. Przepis…” w cudzysłowie (treść dodawanego artykułu)
+NOWELA = ("Art. 1. W ustawie z dnia 6 czerwca 1997 r. – Kodeks karny wprowadza się następujące zmiany: "
+          "1) po art. 115 dodaje się art. 115a w brzmieniu: „Art. 115a. Przepisy art. 115 stosuje się odpowiednio.”; "
+          "2) w art. 148 § 1 otrzymuje brzmienie: „§ 1. Kto zabija człowieka…”. "
+          "Art. 2. Do spraw wszczętych stosuje się przepisy dotychczasowe. Art. 3. Ustawa wchodzi w życie po 14 dniach.")
+seg = na_dzien._segment(NOWELA, "6 czerwca 1997 r.")
+sprawdz(seg is not None and na_dzien._wymienia(seg, "148"), "zmiana po cytowanym „Art. 115a. Przepisy…” zostaje w segmencie")
+sprawdz(seg is not None and "dotychczasowe" not in seg, "segment kończy się na art. 2 noweli")
+
 print("wszystko OK" if not bledy else f"{bledy} błędów")
 sys.exit(1 if bledy else 0)

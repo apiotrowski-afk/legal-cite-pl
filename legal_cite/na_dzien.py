@@ -155,9 +155,16 @@ def _segment(tekst_html: str, data_ustawy: str) -> str | None:
     m = re.search(r'[Ww] ustawie z dnia ' + re.escape(data_ustawy), tekst)
     if not m:
         return None
-    koniec = re.search(r'Art\.\s*\d+[a-z]*\.\s+(?:W\s+ustawie|Do\s|Przepis|Ustawa\s+wchodzi|Traci\s+moc)',
-                       tekst[m.end():])
-    return tekst[m.start():m.end() + (koniec.start() if koniec else len(tekst))]
+    reszta = tekst[m.end():]
+    # granica to kolejny artykuł nowelizacji, nie „Art. 5a. Przepis…” w cudzysłowie
+    # (treść dodawanego artykułu) — inaczej dalsze zmiany wypadłyby z segmentu
+    koniec = len(reszta)
+    for k in re.finditer(r'Art\.\s*\d+[a-z]*\.\s+(?:W\s+ustawie|Do\s|Przepis|Ustawa\s+wchodzi|Traci\s+moc)',
+                         reszta):
+        if reszta.count("„", 0, k.start()) <= reszta.count("”", 0, k.start()):
+            koniec = k.start()
+            break
+    return tekst[m.start():m.end() + koniec]
 
 
 def _numer(art: str) -> str | None:
@@ -216,6 +223,15 @@ def _nowe_brzmienie(segment: str, art: str) -> str | None:
     return segment[m.end():i - 1] if glebokosc == 0 else None
 
 
+def _calosciowa(segment: str) -> bool:
+    """Zmiana bez wskazania artykułów: „w całej ustawie wyrazy … zastępuje się”,
+    „użyte w ustawie”, nowe brzmienie całej ustawy albo działu/tytułu. Wtedy
+    brak numeru artykułu w nowelizacji niczego nie dowodzi."""
+    return bool(re.search(r'(?i)w\s+całej\s+ustawie|użyt\w*\s+w\s+(?:całej\s+)?ustawie'
+                          r'|ustawa\s+otrzymuje\s+brzmienie|(?:dział|tytuł|księg\w*)\s+[IVXLC\d]+\w*\s+otrzymuje',
+                          segment))
+
+
 async def _tekst_nowelizacji(c: httpx.AsyncClient, ident: str) -> str | None:
     """Treść nowelizacji: HTML, a gdy API daje tylko PDF (Dz.U. od 2025 r.) —
     warstwa tekstowa PDF przez pdftotext."""
@@ -264,7 +280,8 @@ async def _nowelizacje(c: httpx.AsyncClient, meta: dict, od: _dt.date, do: _dt.d
     wpisy = [(ent, d) for ent, d in wpisy if d and od < d <= do]
     sprawdzaj = sprawdzaj and len(wpisy) <= 20  # przy setkach nowelizacji (stan sprzed t.j.) nie pobieramy każdej
     for ent, d in wpisy:
-        poz = {"id": ent["id"], "data": d, "wymienia": None, "nowe_brzmienie": None, "uchyla": False}
+        poz = {"id": ent["id"], "data": d, "wymienia": None, "nowe_brzmienie": None, "uchyla": False,
+               "calosciowa": False}
         if sprawdzaj and data_ustawy:
             kl = (ent["id"], meta.get("ELI") or "")
             if kl not in _segmenty:
@@ -281,6 +298,7 @@ async def _nowelizacje(c: httpx.AsyncClient, meta: dict, od: _dt.date, do: _dt.d
                     rozdzial and re.search(rf'(?i)rozdzia\w*\s+{re.escape(rozdzial)}(?![\d\w])', seg))
                 poz["nowe_brzmienie"] = _nowe_brzmienie(seg, art)
                 poz["uchyla"] = _uchyla(seg, art, rozdzial)
+                poz["calosciowa"] = _calosciowa(seg)
         out.append(poz)
     return sorted(out, key=lambda p: p["data"])
 
@@ -497,6 +515,17 @@ async def verify_article_na_dzien(citation: str, na_dzien: str) -> str:
                      f"{ref} weszły w życie dopiero po tym dniu, więc podaję brzmienie sprzed nich. "
                      "Zmiana mogła też dotknąć artykułu pośrednio — sprawdź wykaz poniżej.",
                      "ustalone_z_tresci_nowelizacji", baza, stan_b, tekst_b)
+
+    # Nie ma kolejnego t.j., ale każdą nowelizację z okresu przeczytaliśmy i żadna
+    # nie dotyka artykułu (ani jego rozdziału, ani całej ustawy) — brzmienie bez zmian.
+    if (not nast and lista
+            and all(p["wymienia"] is False and not p["uchyla"] and not p["calosciowa"] for p in lista)):
+        return wynik(f"ustalone z treści nowelizacji (nie potwierdzone kolejnym tekstem jednolitym) — "
+                     f"żadna z nowelizacji z tego okresu ({len(lista)}) nie wymienia {ref}"
+                     + (f" ani jego rozdziału {rozdzial}" if rozdzial else "")
+                     + ", więc podaję brzmienie z tekstu przed tym dniem. Zmiana mogła dotknąć artykułu "
+                     "pośrednio (definicje, przepisy przejściowe) — sprawdź wykaz poniżej.",
+                     "ustalone_bez_zmian_z_tresci_nowelizacji", baza, stan_b, tekst_b)
 
     dodatek = ""
     if nast:
