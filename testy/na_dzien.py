@@ -56,6 +56,11 @@ PRZYPADKI = [
      ("ustalone_bez_zmian_z_tresci_nowelizacji",)),
     ("art. 296 Dz.U. 2023 poz. 1170", "2026-12-01", ["Dz.U. 2026 poz. 1296", "wymienia art. 296"], [],
      ("nieustalone", "ustalone_z_tresci_nowelizacji")),
+    # 3.11.2026: data z wykazu ELI to wejście w życie zmian (ustawa o AI: rozdział 9 od 28.10.2026),
+    # a cała ustawa zmieniająca weszła 11.08.2026 — pokazujemy obie
+    ("art. 34 ustawy o ochronie danych osobowych", "2026-11-15",
+     ["Dz.U. 2026 poz. 1003, wejście w życie zmian 28.10.2026; cała ustawa zmieniająca od 11.08.2026"], [],
+     USTAL + ("nieustalone",)),
     # od 29.10.2026 akty UE też na dzień (wersja skonsolidowana obowiązująca w tym dniu)
     ("art. 6 RODO", "2020-01-01", ["Zgodność przetwarzania z prawem", "brzmienie na dzień 01.01.2020"],
      ["tylko dla aktów polskich"], [None]),

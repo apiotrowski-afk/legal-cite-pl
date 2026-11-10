@@ -281,7 +281,15 @@ async def _nowelizacje(c: httpx.AsyncClient, meta: dict, od: _dt.date, do: _dt.d
     sprawdzaj = sprawdzaj and len(wpisy) <= 20  # przy setkach nowelizacji (stan sprzed t.j.) nie pobieramy każdej
     for ent, d in wpisy:
         poz = {"id": ent["id"], "data": d, "wymienia": None, "nowe_brzmienie": None, "uchyla": False,
-               "calosciowa": False}
+               "calosciowa": False, "wejscie_aktu": None}
+        if sprawdzaj:
+            # data z wykazu dotyczy zmian TEJ ustawy; cała nowelizacja może wejść
+            # w życie wcześniej (np. ustawa o AI: całość 11.08.2026, rozdział
+            # „Zmiany w przepisach” 28.10.2026)
+            try:
+                poz["wejscie_aktu"] = _data((await _meta(c, ent["id"])).get("entryIntoForce"))
+            except (httpx.HTTPError, ValueError):
+                pass
         if sprawdzaj and data_ustawy:
             kl = (ent["id"], meta.get("ELI") or "")
             if kl not in _segmenty:
@@ -313,10 +321,14 @@ def _opis_nowelizacji(lista: list[dict], art: str, rozdzial: str | None = None) 
              None: "treści nie sprawdzono"}[p["wymienia"]]
         if p.get("uchyla"):
             w = f"UCHYLA art. {art}" + (f" (uchyla rozdział {rozdzial})" if rozdzial else "")
-        wiersze.append(f"- {_adres(p['id'])}, wejście w życie {p['data']:%d.%m.%Y} ({w})")
+        cala = p.get("wejscie_aktu")
+        inna = f"; cała ustawa zmieniająca od {cala:%d.%m.%Y}" if cala and cala != p["data"] else ""
+        wiersze.append(f"- {_adres(p['id'])}, wejście w życie zmian {p['data']:%d.%m.%Y}{inna} ({w})")
     if len(lista) > 15:
         wiersze.append(f"- … i {len(lista) - 15} kolejnych")
-    wiersze.append("Daty to wejście w życie całej nowelizacji; pojedyncze jej przepisy mogą wchodzić w życie później.")
+    wiersze.append("Daty wg wykazu ELI to wejście w życie zmian w tej ustawie — może być inne niż wejście "
+                   "w życie całej ustawy zmieniającej; pojedyncze przepisy zmieniające mogą mieć jeszcze "
+                   "inne terminy (sprawdź przepis końcowy nowelizacji).")
     return "\n".join(wiersze)
 
 
