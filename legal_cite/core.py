@@ -530,8 +530,13 @@ _IDX_SUP = "[¹²³⁴⁵⁶⁷⁸⁹⁰ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿ�
 # („. ”, „; ”, „: ”, „) ”) — „3.” w odesłaniu „w ust. 2 i 3.” to nie ustęp 3 (Konstytucja
 # art. 55 ust. 1 urywał się na „w ust. 2 i”; zapytanie o ust. 3 mogło zacząć się w odesłaniu).
 _POCZATEK_JEDN = r'(?:^|(?<=[.;:)\]”"]\s))'
+# Kropka skrótu odesłania („art. 124.”, „ust. 3.”, „poz. 5.”) to nie koniec zdania: numer
+# po nim jest celem odesłania, a nie nową jednostką. Bez tego ustęp kończący się odesłaniem
+# był ucinany przed numerem, a cytowany „ust. 3” trafiał na „ust. 3.” z końca ust. 2 i był
+# zwracany jako samo „3.” (#14; stres-test z Astrą 2026-11-09: 9 ze 120 ocenionych ustępów).
+_NIE_ODESLANIE = r'(?<![Aa]rt\.\s)(?<![Uu]st\.\s)(?<!poz\.\s)(?<![Pp]ar\.\s)'
 _JEDN_USTEP_RE = re.compile(
-    rf'{_POCZATEK_JEDN}(?:§\s*)?(?<![\d\w])(?<!\d\s)\d+[a-z]{{0,2}}'
+    rf'{_POCZATEK_JEDN}{_NIE_ODESLANIE}(?:§\s*)?(?<![\d\w])(?<!\d\s)\d+[a-z]{{0,2}}'
     rf'(?:\s+\d+[a-z]?(?=\s?\.\s)|\s*\[\d+[a-z]?\]|{_IDX_SUP})?\s?\.\s')
 
 
@@ -552,7 +557,7 @@ def _cut_ustep(art_text: str, ustep: str) -> str | None:
         nr = rf'{re.escape(baza)}\.\s'
     # „(?<!Art\.\s)”: nagłówek „Art. 1.” nie jest ustępem 1 — bez tego „art. 1 ust. 1” aktu
     # o numeracji „Art. 1. 1. Nabycie…” (u.n.n.c.) oddawał samo „1.” (granica = następny ustęp)
-    m = re.search(rf'{_POCZATEK_JEDN}(?:§\s*)?(?<![\d\w])(?<!\d\s)(?<!Art\.\s){nr}', art_text)
+    m = re.search(rf'{_POCZATEK_JEDN}{_NIE_ODESLANIE}(?:§\s*)?(?<![\d\w])(?<!\d\s){nr}', art_text)
     if not m and baza == "1" and not idx:
         # ust. 1 aktu UE stoi zaraz po tytule artykułu („Artykuł 28 Podmiot
         # przetwarzający 1. Jeżeli…”), bez znaku przestankowego przed numerem
