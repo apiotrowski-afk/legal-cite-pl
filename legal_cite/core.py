@@ -1630,13 +1630,19 @@ async def _akt_z_adresu(tekst: str) -> dict | str | None:
         wynik = (f"❌ {_adres_dz_u(ident)} ({meta.get('title', '')[:120]}) jeszcze nie weszła "
                  f"w życie (wg ELI: {meta.get('entryIntoForce') or meta.get('status')}) — narzędzie "
                  f"podaje brzmienie obowiązujących ustaw.")
-    elif meta.get("status") in ("uchylony", "wygaśnięcie aktu", "akt jednorazowy"):
+    elif meta.get("status") in ("uchylony", "wygaśnięcie aktu"):
         wynik = (f"❌ {_adres_dz_u(ident)} ({meta.get('title', '')[:120]}) ma w ELI status "
                  f"„{meta.get('status')}” — narzędzie podaje brzmienie obowiązujących ustaw.")
     else:
         pub, rok, poz = ident.split("/")
         tytul = re.sub(r'\s+', ' ', meta.get("title") or ident).strip().rstrip('.')
         wynik = dict(pub=pub, year=int(rok), pos=int(poz), name=tytul)
+        # „akt jednorazowy” w ELI to akt jednego zdarzenia (ratyfikacja, utworzenie uczelni,
+        # obszar Natura 2000), a nie akt nieobowiązujący — ELI ma go jako IN_FORCE. Brzmienie
+        # podajemy z ostrzeżeniem; odmowa zostaje dla „uchylony” i „wygaśnięcie aktu”
+        # (stres-test 9.11.2026: 53 odmowy, wg Astry zbędne; decyzja Adama 11.11.2026).
+        if meta.get("status") == "akt jednorazowy":
+            wynik["jednorazowy"] = True
     _akty_z_adresu[klucz] = (time.time(), wynik)
     return wynik
 
@@ -2162,6 +2168,12 @@ async def verify_article(citation: str) -> str:
         if glowna == "art." and re.search(rf'(?m)^§ {re.escape(art)}\.', wynik) \
                 and not re.search(rf'(?m)^Art\. {re.escape(art)}\.', wynik):
             wynik = wynik.replace(f"**, {ref}", f"**, § {ref[len('art. '):]}", 1)
+        if info.get("jednorazowy") and wynik.startswith(("📜", "📄")):
+            glowa, _, reszta = wynik.partition("\n")
+            wynik = (f"{glowa}\n⚠ Akt jednorazowy (status w ELI): dotyczy jednego zdarzenia, a jego "
+                     f"przepisy mogły zostać wykonane (skonsumowane) — sprawdź, czy norma ma jeszcze "
+                     f"zastosowanie.\n{reszta}")
+            wynik = wynik.replace("[dla modelu] ", "[dla modelu] akt_jednorazowy=tak; ", 1)
         return wynik
 
     known = ", ".join(dict.fromkeys(list(PL_ACTS) + list(EU_ACTS)))
