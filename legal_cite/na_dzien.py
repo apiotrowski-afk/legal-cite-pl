@@ -196,7 +196,11 @@ def _uchyla(segment: str, art: str, rozdzial: str | None) -> bool:
     """Czy nowelizacja wprost uchyla artykuł: „uchyla się art. 14”, „art. 14
     uchyla się”, „uchyla się art. 12–15”, „uchyla się rozdział 3”."""
     numer = _numer(art)
-    if numer and re.search(rf'uchyla\s+się\s+art\.\s*{numer}|(?<![\w.])art\.\s*{numer}\s+uchyla\s+się', segment):
+    # „w art. 78 uchyla się § 2” uchyla tylko jednostkę artykułu, nie cały artykuł
+    # (k.c. art. 78 na 31.12.2016 wychodził jako „nie obowiązuje”, test k.c. 2026-11-10)
+    jednostka = r'(?!\s*(?:§|ust\.|pkt|lit\.|zdani|część|wyraz))'
+    if numer and re.search(rf'uchyla\s+się\s+art\.\s*{numer}{jednostka}'
+                           rf'|(?<![\w.])(?<!\bw\s)art\.\s*{numer}\s+uchyla\s+się{jednostka}', segment):
         return True
     if re.fullmatch(r'\d+', art) and any(
             int(a) <= int(art) <= int(b)
@@ -270,7 +274,8 @@ def _rozdzial(raw_html: str, art: str) -> str | None:
 
 
 async def _nowelizacje(c: httpx.AsyncClient, meta: dict, od: _dt.date, do: _dt.date,
-                       art: str, sprawdzaj: bool, rozdzial: str | None = None) -> list[dict]:
+                       art: str, sprawdzaj: bool, rozdzial: str | None = None,
+                       ogloszone_do: _dt.date | None = None) -> list[dict]:
     """Nowelizacje ustawy wchodzące w życie w (od, do], z datą i — gdy sprawdzaj —
     informacją, czy wymieniają artykuł albo jego rozdział (None = nie dało się
     sprawdzić)."""
@@ -278,18 +283,25 @@ async def _nowelizacje(c: httpx.AsyncClient, meta: dict, od: _dt.date, do: _dt.d
     out = []
     wpisy = [(ent, _data(ent.get("date"))) for ent in (meta.get("references") or {}).get("Akty zmieniające", [])]
     wpisy = [(ent, d) for ent, d in wpisy if d and od < d <= do]
+    if ogloszone_do:  # wstępnie po roku z adresu (DU/RRRR/poz.), dokładnie po dacie ogłoszenia niżej
+        wpisy = [(ent, d) for ent, d in wpisy
+                 if not re.match(r'\w+/(\d{4})/', ent["id"]) or int(ent["id"].split("/")[1]) <= ogloszone_do.year]
     sprawdzaj = sprawdzaj and len(wpisy) <= 20  # przy setkach nowelizacji (stan sprzed t.j.) nie pobieramy każdej
     for ent, d in wpisy:
         poz = {"id": ent["id"], "data": d, "wymienia": None, "nowe_brzmienie": None, "uchyla": False,
-               "calosciowa": False, "wejscie_aktu": None}
-        if sprawdzaj:
+               "calosciowa": False, "wejscie_aktu": None, "ogloszenie": None}
+        if sprawdzaj or ogloszone_do:
             # data z wykazu dotyczy zmian TEJ ustawy; cała nowelizacja może wejść
             # w życie wcześniej (np. ustawa o AI: całość 11.08.2026, rozdział
             # „Zmiany w przepisach” 28.10.2026)
             try:
-                poz["wejscie_aktu"] = _data((await _meta(c, ent["id"])).get("entryIntoForce"))
+                m = await _meta(c, ent["id"])
+                poz["wejscie_aktu"] = _data(m.get("entryIntoForce"))
+                poz["ogloszenie"] = _data(m.get("announcementDate"))
             except (httpx.HTTPError, ValueError):
                 pass
+            if ogloszone_do and poz["ogloszenie"] and poz["ogloszenie"] > ogloszone_do:
+                continue
         if sprawdzaj and data_ustawy:
             kl = (ent["id"], meta.get("ELI") or "")
             if kl not in _segmenty:
@@ -342,7 +354,11 @@ def _zrodlo(wpis: dict) -> str:
 
 def _taki_sam(a: str, b: str) -> bool:
     from legal_cite import pdf_tj
-    return "".join(pdf_tj.tokeny(a)) == "".join(pdf_tj.tokeny(b))
+    # bez nagłówka „Art. N.” — źródło bywa myli „l” z „1” w numerze („Art. 5891.” = art. 589l)
+    # i bez adnotacji narzędzia o naprawionym numerze (⚠ Źródło drukuje numer…)
+    bez = lambda s: re.sub(r'\n\n⚠ Źródło drukuje numer[^\n]*', '',  # noqa: E731
+                           re.sub(r'^\s*Art\.\s*\S+?\s*\.', '', s or ""))
+    return "".join(pdf_tj.tokeny(bez(a))) == "".join(pdf_tj.tokeny(bez(b)))
 
 
 async def _akt_ue_na_dzien(act: str, dzien: _dt.date) -> dict | str | None:
@@ -450,9 +466,17 @@ async def verify_article_na_dzien(citation: str, na_dzien: str) -> str:
         # na dziś i na przyszłość: zmiany już ogłoszone, które wejdą w życie później
         zapowiedzi = (await _nowelizacje(c, meta, max(okno_do, dzien), _dt.date.max, art, sprawdzaj=True,
                                          rozdzial=rozdzial) if dzien >= dzis else [])
+        # Kolejny t.j. może drukować z wyprzedzeniem zmiany ogłoszone przed nim, a wchodzące
+        # w życie po nim (k.p.c. art. 560²–560¹² w t.j. z 07.08.2020, Dz.U. 2020 poz. 956 od 30.11.2020)
+        wyprzedzone = []
+        if nast and not zapowiedzi:
+            wyprzedzone = await _nowelizacje(c, meta, okno_do, _dt.date.max, art, sprawdzaj=True,
+                                             rozdzial=rozdzial, ogloszone_do=nast["data"])
+            wyprzedzone = [p for p in wyprzedzone if p["ogloszenie"] and p["wymienia"] is not False]
+            zapowiedzi = wyprzedzone
     zapowiedziane_uchylenie = next((p for p in zapowiedzi if p["uchyla"]), None)
     do_dnia = [p for p in lista if p["data"] <= dzien]
-    po_dniu = [p for p in lista if p["data"] > dzien]
+    po_dniu = [p for p in lista if p["data"] > dzien] + wyprzedzone
 
     def wynik(ustalenie: str, kod: str, wpis: dict, stan: str, tekst: str | None, dodatek: str = "") -> str:
         # o stanie w danym dniu mówimy wprost tylko przy ustaleniu, nie przy „nieustalone”
@@ -496,7 +520,9 @@ async def verify_article_na_dzien(citation: str, na_dzien: str) -> str:
     if nast and stan_b == stan_n and stan_b in ("brak", "nie_obowiazuje"):
         return wynik(f"potwierdzone — artykułu nie ma ani w tym tekście, ani w kolejnym "
                      f"({_zrodlo(nast)}).", "potwierdzone_brak_artykulu", baza, stan_b, tekst_b)
-    if nast and not po_dniu:
+    # Kolejny t.j. drukujący kilka brzmień (np. tylko przyszłe, z nowelizacji ogłoszonej przed nim)
+    # nie potwierdza niczego — k.c. art. 385⁵ na 30.06.2023 wychodził „potwierdzone” bez tekstu.
+    if nast and not po_dniu and stan_n != "niejednoznaczne":
         return wynik(f"potwierdzone — wszystkie nowelizacje z okresu między tekstami jednolitymi "
                      f"weszły w życie najpóźniej {dzien:%d.%m.%Y}, a kolejny tekst je uwzględnia.",
                      "potwierdzone_kolejny_tj", nast, stan_n, tekst_n)
@@ -509,7 +535,7 @@ async def verify_article_na_dzien(citation: str, na_dzien: str) -> str:
                      + f", więc w dniu {dzien:%d.%m.%Y} artykuł nie obowiązuje. Poniżej brzmienie sprzed "
                      "uchylenia.", "ustalone_uchylony", baza, stan_b, tekst_b)
 
-    wymieniajace = [p for p in lista if p["wymienia"]]
+    wymieniajace = [p for p in lista + wyprzedzone if p["wymienia"]]
     ostatnia = wymieniajace[-1] if wymieniajace else None
     if (nast and stan_n == "ok" and ostatnia and all(p["data"] <= dzien for p in wymieniajace)
             and ostatnia["nowe_brzmienie"] and _taki_sam(ostatnia["nowe_brzmienie"], tekst_n)):
@@ -517,7 +543,7 @@ async def verify_article_na_dzien(citation: str, na_dzien: str) -> str:
                      f"dniem) nadała {ref} całe nowe brzmienie, a kolejny tekst ({_zrodlo(nast)}) ma to samo "
                      "brzmienie, więc późniejsze nowelizacje artykułu nie zmieniły.",
                      "potwierdzone_brzmieniem_z_nowelizacji", nast, stan_n, tekst_n)
-    if nast and wymieniajace and all(p["data"] <= dzien for p in wymieniajace):
+    if nast and stan_n != "niejednoznaczne" and wymieniajace and all(p["data"] <= dzien for p in wymieniajace):
         return wynik("ustalone z treści nowelizacji (nie potwierdzone) — nowelizacje wymieniające "
                      f"{ref} weszły w życie przed tym dniem, więc podaję brzmienie z kolejnego tekstu. "
                      "Zmiana mogła też dotknąć artykułu pośrednio — sprawdź wykaz poniżej.",

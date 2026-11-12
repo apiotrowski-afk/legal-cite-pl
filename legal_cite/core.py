@@ -986,6 +986,11 @@ def _wybierz_podjednostki_html(html: str, mapa: dict[str, str], dzis: _dt.date,
 
 # Pogrubiony nagłówek artykułu w treści akapitu: t.j. u.ś.u.d.e. (Dz.U. 2024 poz. 1513)
 # drukuje „<B>Art. 15. </B>” w akapicie art. 14 ust. 4 i nie daje art. 15 własnej jednostki.
+_STRUKTURA_W_ART_RE = re.compile(
+    r'<div class="unit unit_(?:chpt|bran|sect|schp|subchpt|titl|book|part|divi)\b', re.IGNORECASE)
+_OBCY_AKAPIT_RE = re.compile(
+    r'<div data-template="xText"[^>]*\bALIGN="center"[^>]*>.*?</div>'
+    r'|<div data-template="xText"[^>]*>\s*\(Dz\.\s*U\.[^()<]*\)\s*\.?\s*</div>', re.IGNORECASE | re.DOTALL)
 _WKLEJONY_ART_RE = re.compile(r'<B\b[^>]*>\s*Art\.(?:\s|&nbsp;)*(\d+[a-z]*)\s*\.\s*</B>', re.IGNORECASE)
 
 
@@ -1007,6 +1012,19 @@ def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | 
         if 'pass_' in m.group(1):
             continue
         fragment = raw_html[m.start():_koniec_div(raw_html, m.start())]
+        # jednostka struktury (rozdział, oddział…) zagnieżdżona w artykule to wada źródła —
+        # t.j. k.p.c. Dz.U. 2014 poz. 101 ma „Rozdział 1 Właściwość rzeczowa” wewnątrz § 2
+        # art. 15; nagłówek nie należy do artykułu (poza cytatem nowelizacji w cite-box)
+        struktura = _STRUKTURA_W_ART_RE.search(fragment, 1)
+        if struktura and "cite-box" not in fragment[:struktura.start()]:
+            fragment = fragment[:struktura.start()]
+        # wyśrodkowany akapit to nagłówek („CZĘŚĆ WOJSKOWA” w § 2 art. 316 k.k., t.j. 2016),
+        # a samotne „(Dz. U. poz. 1638).” to zabłąkany przypis (art. 430 k.c., t.j. 2020)
+        if "cite-box" not in fragment:
+            fragment = _OBCY_AKAPIT_RE.sub("", fragment)
+            # odnośnik-glosa z wykazem dyrektyw w treści artykułu (art. 516 k.s.h., t.j. 2013)
+            while (g := re.search(r'<div class="unit unit_none pro-gloss', fragment)):
+                fragment = fragment[:g.start()] + fragment[_koniec_div(fragment, g.start()):]
         odn = _PIERWSZY_ODNOSNIK_RE.search(fragment)
         przyszle = _jeszcze_nie(mapa, _wlasny_odnosnik_html(fragment, 0, len(fragment)), dzis)
         uwagi: list[str] = []
@@ -1043,6 +1061,13 @@ def _jednostki_html(key: str, raw_html: str) -> list[tuple[str, str, _dt.date | 
     return out
 
 
+def _miedzy(poprz: str, nazwa: str, nast: str) -> bool:
+    """Czy numer „611p” staje dokładnie między sąsiadami z tą samą podstawą („611o”, „611r”)."""
+    m, mp, mn = (re.fullmatch(r'(\d+)([a-z]*)', x) for x in (nazwa, poprz, nast))
+    return bool(m and mp and mn and mp.group(1) == m.group(1) == mn.group(1)
+                and mp.group(2) < m.group(2) < mn.group(2))
+
+
 def _napraw_zlepki(key: str, jedn: list[tuple]) -> list[tuple]:
     """Naprawia numer artykułu zlepiony z numerem odnośnika.
 
@@ -1058,6 +1083,16 @@ def _napraw_zlepki(key: str, jedn: list[tuple]) -> list[tuple]:
         return jedn
     bazy = [int(re.match(r'(\d+)', n).group(1)) for n, *_ in jedn]
     for i in range(1, len(jedn) - 1):
+        # „l” i „1” zamienione w numerze: t.j. k.p.k. Dz.U. 2016 poz. 1749 ma `arti_5891`
+        # między 589k a 589m oraz `arti_61ls` między 611r a 611t — artykuł był „nieobecny”.
+        # Przyjmujemy zamianę tylko, gdy wynik staje dokładnie między sąsiadami z tą samą podstawą.
+        nazwa = jedn[i][0]
+        kandydaci = {re.sub(r'(?<=\d)l', '1', nazwa), re.sub(r'1$', 'l', nazwa)} - {nazwa}
+        trafiony = next((k for k in kandydaci if _miedzy(jedn[i - 1][0], k, jedn[i + 1][0])), None)
+        if trafiony:
+            _zlepki[(key, trafiony)] = nazwa
+            jedn[i] = (trafiony,) + jedn[i][1:]
+            continue
         if bazy[i - 1] < bazy[i] < bazy[i + 1]:
             continue
         m = re.fullmatch(r'(\d+)', jedn[i][0])
@@ -1149,9 +1184,9 @@ def extract_pl_article_html(key: str, raw_html: str, art: str,
         tekst += "\n\n" + u
     zlepek = _zlepki.get((key, klucz))
     if zlepek:
-        tekst += (f"\n\n⚠ Źródło drukuje numer tego artykułu zlepiony z numerem "
-                  f"odnośnika („Art. {zlepek}.”). Powyżej treść art. {klucz} "
-                  f"— numer odczytany z kolejności artykułów w akcie.")
+        tekst += (f"\n\n⚠ Źródło drukuje numer tego artykułu błędnie („Art. {zlepek}.”"
+                  + (" — zlepiony z numerem odnośnika" if zlepek.isdigit() and zlepek.startswith(klucz) else "")
+                  + f"). Powyżej treść art. {klucz} — numer odczytany z kolejności artykułów w akcie.")
     if len(trafienia) > 1:
         tekst += f"\n\n⚠ Tekst jednolity drukuje {len(trafienia)} brzmienia tego artykułu. "
         tekst += (f"Powyżej brzmienie obowiązujące od {data_wyboru:%d.%m.%Y}."

@@ -38,6 +38,25 @@ PRZYPADKI = [
     ("art. 131[1a] § 1 KPC", "2024-10-01", ["niemożności doręczenia"], ["operatora pocztowego"], USTAL),
     ("art. 117¹ KC", "2019-01-01", ["konsument"], ["nie istniał"], USTAL),
     ("art. 646 KC", "2020-01-01", ["lat dwóch"], [], POTW),
+    # test k.c. na dzień (2026-11-10): „w art. 78 uchyla się § 2” to nie uchylenie art. 78
+    ("art. 78 KC", "2016-12-31", ["własnoręcznego podpisu"], ["artykuł nie obowiązuje"], USTAL),
+    ("art. 172 KC", "2024-03-01", ["zasiedzenie"], ["artykuł nie obowiązuje"], USTAL),
+    # kolejny t.j. drukuje tylko przyszłe brzmienie (od 7.01.2024) — nie „potwierdzone”, stare brzmienie
+    ("art. 385⁵ KC", "2023-06-30", ["działalnością gospodarczą"], [], ("nieustalone",) + USTAL[len(POTW):]),
+    # masowy test (2026-11-10): wady HTML starszych t.j. — nagłówki, przypisy, „l”/„1” w numerze
+    ("art. 15 KPC", "2015-05-25", ["stał się właściwy"], ["Rozdział 1"], POTW),
+    ("art. 316 DU/1997/553", "2017-03-03", ["zniszczeniem przedmiotu"], ["WOJSKOWA"], POTW),
+    ("art. 430 KC", "2021-01-01", ["powierzonej jej czynności"], ["1638"], POTW),
+    ("art. 516 DU/2000/1037", "2015-01-01", ["sądu rejestrowego"], ["2001/24"], POTW),
+    ("art. 589l DU/1997/555", "2017-03-17", ["niezwłocznie", "5891"], ["nie ma art."], POTW),
+    ("art. 611s DU/1997/555", "2017-03-17", ["Trybunałem"], ["nie ma art."], POTW),
+    # kolejny t.j. drukuje § 1¹ tylko w przyszłym brzmieniu — stare brzmienie, bez „potwierdzone”
+    ("art. 276 DU/2000/1037", "2019-11-30", ["Likwidatorami są członkowie zarządu"], [],
+     ("nieustalone",) + USTAL[len(POTW):]),
+    # Astra (2026-11-12): kolejny t.j. (07.08.2020) drukuje art. 560² z wyprzedzeniem — nowela ogłoszona
+    # 30.04.2020 wchodzi 30.11.2020; wcześniej „potwierdzone_kolejny_tj” dla przepisu, którego jeszcze nie było
+    ("art. 560² KPC", "2020-07-30", ["nie istniał"], ["przeciwdziałaniu przemocy"], USTAL[len(POTW):]),
+    ("art. 560² KPC", "2020-12-01", ["przeciwdziałaniu przemocy"], ["nie istniał"], USTAL),
     ("art. 36 § 1 KP", "2015-06-01", ["czas nieokreślony jest uzależniony"], ["zawartej na czas określony jest"], USTAL),
     ("art. 36 § 1 KP", "2016-03-01", ["umowy o pracę zawartej na czas określony"], [], USTAL),
     ("art. 22 § 1¹ KP", "2020-01-01", ["podaję cały artykuł", "bez względu na nazwę"], [], USTAL),
